@@ -1,9 +1,12 @@
-# MEXC Micro Maker LIVE Bot v0015
+# MEXC Micro Maker LIVE Bot v0016
 
 Отдельный Telegram-бот для live micro-maker / zero-fee scalping на MEXC futures.
 Старые режимы вырезаны. Из старого бота оставлен рабочий механизм MEXC API: подпись запросов, открытие/закрытие сделок, отмена ордеров, баланс, позиции, плечо, zero-fee/fee checks.
 
-## Что изменено в v0015
+## Что изменено в v0016
+
+- Исправлен zero-fee scanner: теперь основная проверка идёт через `/api/v1/private/account/contract/zero_fee_rate`, затем fallback через `/api/v1/private/account/contract/fee_rate`, и только потом старые account-level fee endpoints.
+- Добавлен маппинг `contractId -> SYMBOL_USDT` через публичный `/api/v1/contract/detail`, потому что zero-fee endpoint возвращает contractId.
 
 - Для Coolify теперь нужны только 2 переменные окружения:
   - `TELEGRAM_BOT_TOKEN`
@@ -12,7 +15,7 @@
 - MEXC API задаётся только через Telegram: `/api set API_KEY API_SECRET`.
 - MEXC REST/WS endpoint, recv-window, private rate limit, public/private timeout и strict leverage теперь лежат в runtime settings и могут меняться через `/set`.
 - `.env.example` очищен: там оставлены только токен Telegram и admin id.
-- Версия везде обновлена на `v0015`.
+- Версия везде обновлена на `v0016`.
 
 ## Coolify ENV
 

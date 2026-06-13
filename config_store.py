@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 DEFAULTS: dict[str, Any] = {
-    "bot_version": "v0015",
+    "bot_version": "v0016",
 
     # secrets are set from Telegram with /api set KEY SECRET. Telegram token stays in ENV.
     "mexc_api_key": "",

@@ -329,7 +329,7 @@ class MicroMakerEngine:
             self._log_error("start_balance_error", e)
         self.task = asyncio.create_task(self._run_loop(), name="micro_maker_loop")
         self._log_event("start_success", start_equity=self.stats.start_equity)
-        return "▶️ Micro Maker LIVE v0015 запущен. WS depth scanner активен, авто-поиск zero-fee монет включён."
+        return "▶️ Micro Maker LIVE v0016 запущен. WS depth scanner активен, авто-поиск zero-fee монет включён."
 
     async def stop(self, close_positions: bool = False) -> str:
         self._log_event("stop_requested", close_positions=close_positions, active_tasks=list(self.active_tasks.keys()))
@@ -412,7 +412,7 @@ class MicroMakerEngine:
         total_losses = int(s.get("total_losses_count") or 0)
         total_pnl = float(s.get("total_estimated_pnl_usdt") or 0.0)
         return (
-            f"🤖 MEXC Micro Maker LIVE {s.get('bot_version', 'v0015')}\n"
+            f"🤖 MEXC Micro Maker LIVE {s.get('bot_version', 'v0016')}\n"
             f"State: {state} | Updated: {last_update}\n"
             f"Uptime: {h:02d}:{m:02d}:{sec:02d}\n\n"
             f"⚙️ {s.get('leverage')}x | Size: {s.get('position_margin_percent', 10)}% total | "
@@ -465,7 +465,7 @@ class MicroMakerEngine:
             "📊 Micro Maker Status\n\n"
             f"State: {'RUNNING' if self.is_running() else 'STOPPED'}\n"
             f"Active tasks: {len(self.active_tasks)} | Current: {', '.join(self.stats.current_symbols) or '-'}\n"
-            f"Version: {s.get('bot_version', 'v0015')}\n"
+            f"Version: {s.get('bot_version', 'v0016')}\n"
             f"Leverage: {s.get('leverage')}x | One trade size: {s.get('position_margin_percent', 10)}% of TOTAL USDT equity\n"
             f"Max positions: {s.get('max_positions')} | Symbols limit: {s.get('symbols_limit')}\n"
             f"Scanner: {'AUTO' if s.get('auto_select_symbols') else 'MANUAL'} | ZeroFee: {'ON' if s.get('only_zero_fee') else 'OFF'} | scan age: {age:.1f}s | rescan: {s.get('zero_fee_rescan_sec')}s\n"
@@ -515,7 +515,7 @@ class MicroMakerEngine:
 
     async def _run_loop(self) -> None:
         self._log_event("run_loop_started")
-        await self._notify("✅ LIVE loop v0015 started. WS depth scanner активен, авто-сканер zero-fee монет включён, TP/SL виртуальные внутри бота.")
+        await self._notify("✅ LIVE loop v0016 started. WS depth scanner активен, авто-сканер zero-fee монет включён, TP/SL виртуальные внутри бота.")
         while self.running:
             try:
                 s = self._settings()

@@ -696,7 +696,34 @@ class MexcFuturesClient:
 
     # ---------- fee guard ----------
 
+    async def _contract_id_to_symbol_map(self) -> dict[str, str]:
+        """Map MEXC numeric contractId -> SYMBOL_USDT using public contract detail.
+
+        The private zero-fee endpoint returns contractId values, not symbols.
+        The scanner trades symbols, so we translate through /contract/detail.
+        """
+        details = await self._contract_details_all()
+        mapping: dict[str, str] = {}
+        for sym, row in details.items():
+            if not isinstance(row, dict):
+                continue
+            for key in ("contractId", "contract_id", "id"):
+                value = row.get(key)
+                if value in (None, ""):
+                    continue
+                try:
+                    mapping[str(int(float(value)))] = sym
+                except Exception:
+                    mapping[str(value)] = sym
+        return mapping
+
     async def fetch_fee_rates(self) -> dict[str, dict[str, Any]]:
+        """Legacy/account-level fee endpoints.
+
+        Kept as a fallback only. Some MEXC responses from tiered_fee_rate contain
+        a single account-level example/default symbol and are not a zero-fee
+        universe. The scanner should prefer the contract-specific endpoints below.
+        """
         endpoints = [
             "/api/v1/private/account/tiered_fee_rate",
             "/api/v1/private/account/tiered_fee_rate/v2",
@@ -722,21 +749,115 @@ class MexcFuturesClient:
                 continue
         return rates
 
+    async def fetch_contract_fee_rates(self, symbol: str | None = None) -> dict[str, dict[str, Any]]:
+        """Contract-level fee details keyed by SYMBOL_USDT.
+
+        Official MEXC futures docs expose GET
+        /api/v1/private/account/contract/fee_rate with optional symbol.
+        It returns fields like isZeroFeeRate, makerFeeRate and takerFeeRate.
+        """
+        query = {"symbol": self.contract_id(symbol)} if symbol else {}
+        rates: dict[str, dict[str, Any]] = {}
+        try:
+            out = await self.private("GET", "/api/v1/private/account/contract/fee_rate", query=query)
+            rows = self._rows(out.get("data"))
+            id_map: dict[str, str] | None = None
+            for r in rows:
+                if not isinstance(r, dict):
+                    continue
+                sid = self.contract_id(r.get("symbol") or r.get("contract") or r.get("contractName") or "")
+                if (not sid or sid == "_USDT") and r.get("contractId") not in (None, ""):
+                    if id_map is None:
+                        id_map = await self._contract_id_to_symbol_map()
+                    try:
+                        sid = id_map.get(str(int(float(r.get("contractId")))), "")
+                    except Exception:
+                        sid = id_map.get(str(r.get("contractId")), "")
+                if not sid or sid == "_USDT":
+                    continue
+                maker = r.get("makerFeeRate", r.get("realMakerFee", r.get("makerFee", r.get("maker", r.get("openMakerFee")))))
+                taker = r.get("takerFeeRate", r.get("realTakerFee", r.get("takerFee", r.get("taker", r.get("openTakerFee")))))
+                try:
+                    maker_f = float(maker)
+                except Exception:
+                    maker_f = 1.0
+                try:
+                    taker_f = float(taker)
+                except Exception:
+                    taker_f = 1.0
+                is_zero_raw = r.get("isZeroFeeRate")
+                is_zero = None if is_zero_raw is None else bool(is_zero_raw)
+                rates[sid] = {
+                    "maker": maker_f,
+                    "taker": taker_f,
+                    "is_zero": is_zero,
+                    "source": "/api/v1/private/account/contract/fee_rate",
+                    "raw": r,
+                }
+        except Exception as e:
+            log_error("mexc_contract_fee_rate_failed", e, symbol=symbol or "")
+        return rates
+
+    async def fetch_zero_fee_symbols(self, symbol: str | None = None) -> list[str]:
+        """Return symbols from MEXC's dedicated zero-fee contracts endpoint."""
+        query = {"symbol": self.contract_id(symbol)} if symbol else {}
+        try:
+            out = await self.private("GET", "/api/v1/private/account/contract/zero_fee_rate", query=query)
+            data = out.get("data") if isinstance(out, dict) else out
+            if isinstance(data, dict):
+                contracts = data.get("contracts") or data.get("list") or data.get("rows") or []
+            else:
+                contracts = data or []
+            if isinstance(contracts, dict):
+                contracts = [contracts]
+            id_map: dict[str, str] | None = None
+            symbols: list[str] = []
+            for item in contracts if isinstance(contracts, list) else []:
+                if not isinstance(item, dict):
+                    continue
+                sid = self.contract_id(item.get("symbol") or item.get("contract") or item.get("contractName") or "")
+                if (not sid or sid == "_USDT") and item.get("contractId") not in (None, ""):
+                    if id_map is None:
+                        id_map = await self._contract_id_to_symbol_map()
+                    try:
+                        sid = id_map.get(str(int(float(item.get("contractId")))), "")
+                    except Exception:
+                        sid = id_map.get(str(item.get("contractId")), "")
+                if sid and sid != "_USDT":
+                    symbols.append(sid)
+            return sorted(set(symbols))
+        except Exception as e:
+            log_error("mexc_zero_fee_rate_failed", e, symbol=symbol or "")
+            return []
+
     async def verified_zero_fee_symbols(self, max_symbols: int = 0) -> list[str]:
         """Return API-confirmed zero-fee futures symbols.
 
-        max_symbols <= 0 means return the full zero-fee universe. When tickers are
-        available, symbols are pre-sorted by 24h quote volume so the active WS
-        window starts with the most liquid contracts.
+        Preferred source is the dedicated MEXC contract zero-fee endpoint.
+        Fallbacks use contract fee_rate.isZeroFeeRate / maker+taker==0 and then
+        the old account-level endpoints. max_symbols <= 0 returns the full
+        zero-fee universe.
         """
-        rates = await self.fetch_fee_rates()
-        zeros: list[str] = []
-        for sym, fr in rates.items():
-            try:
-                if abs(float(fr.get("maker", 1))) <= 1e-12 and abs(float(fr.get("taker", 1))) <= 1e-12:
-                    zeros.append(sym)
-            except Exception:
-                pass
+        zeros = await self.fetch_zero_fee_symbols()
+
+        if not zeros:
+            rates = await self.fetch_contract_fee_rates()
+            for sym, fr in rates.items():
+                try:
+                    if fr.get("is_zero") is True or (abs(float(fr.get("maker", 1))) <= 1e-12 and abs(float(fr.get("taker", 1))) <= 1e-12):
+                        zeros.append(sym)
+                except Exception:
+                    pass
+
+        if not zeros:
+            rates = await self.fetch_fee_rates()
+            for sym, fr in rates.items():
+                try:
+                    if abs(float(fr.get("maker", 1))) <= 1e-12 and abs(float(fr.get("taker", 1))) <= 1e-12:
+                        zeros.append(sym)
+                except Exception:
+                    pass
+
         zeros = sorted(set(zeros))
         try:
             tickers = await self.all_tickers()

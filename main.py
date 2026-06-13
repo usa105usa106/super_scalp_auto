@@ -189,19 +189,19 @@ def ping_text(update: Update | None = None, started_perf: float | None = None) -
         except Exception:
             telegram_lag = "n/a"
     return (
-        f"🏓 Ping {s.get('bot_version', 'v0015')}\n\n"
+        f"🏓 Ping {s.get('bot_version', 'v0016')}\n\n"
         f"Отклик обработчика: {processing_ms:.1f} ms\n"
         f"Telegram lag: {telegram_lag}\n"
         f"Память: {memory_usage_text()}\n"
         f"Время работы процесса: {format_duration(time.time() - PROCESS_START_TS)}\n"
-        f"Версия: {s.get('bot_version', 'v0015')}"
+        f"Версия: {s.get('bot_version', 'v0016')}"
     )
 
 
 def settings_text() -> str:
     s = STORE.load()
     return (
-        f"⚙️ Micro Maker Settings ({s.get('bot_version', 'v0015')})\n\n"
+        f"⚙️ Micro Maker Settings ({s.get('bot_version', 'v0016')})\n\n"
         f"Leverage: {s['leverage']}x\n"
         f"Max positions: {s['max_positions']}\n"
         f"Symbols limit: {s['symbols_limit']}\n"
@@ -296,7 +296,7 @@ def api_text() -> str:
         "Сохранить: /api set API_KEY API_SECRET\n"
         "Проверить: /api status\n"
         "Удалить: /api clear\n\n"
-        "В v0015 команда /api set автоматически удаляется из чата, чтобы ключи не висели в истории."
+        "В v0016 команда /api set автоматически удаляется из чата, чтобы ключи не висели в истории."
     )
 
 
@@ -322,7 +322,7 @@ def panel_text(engine: MicroMakerEngine | None = None) -> str:
         return e.quick_status_text()
     s = STORE.load()
     return (
-        f"🤖 MEXC Micro Maker LIVE {s.get('bot_version', 'v0015')}\n"
+        f"🤖 MEXC Micro Maker LIVE {s.get('bot_version', 'v0016')}\n"
         "State: STOPPED\n\n"
         f"⚙️ {s.get('leverage')}x | Size: {s.get('position_margin_percent', 10)}% total | "
         f"Pos: {s.get('max_positions')} | Symbols: {s.get('symbols_limit')}\n"
@@ -449,7 +449,7 @@ async def update_live_panel(app: Application, force: bool = False) -> None:
 async def live_panel_loop(app: Application) -> None:
     """Smart live-panel refresh.
 
-    Defaults in v0015:
+    Defaults in v0016:
     - STOPPED: no automatic refresh, so the panel is readable and quiet.
     - RUNNING without an open position: every 5 seconds.
     - RUNNING with an open position: every 2 seconds.
@@ -756,7 +756,7 @@ async def log_full_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     try:
         log_event("log_full_export_requested", chat_id=chat_id)
         path = export_full_log(STORE.load(), engine)
-        caption = f"📄 Full debug log {STORE.load().get('bot_version', 'v0015')}\nОшибки, скан монет, переключения, ордера, закрытия и MEXC API-события."
+        caption = f"📄 Full debug log {STORE.load().get('bot_version', 'v0016')}\nОшибки, скан монет, переключения, ордера, закрытия и MEXC API-события."
         with open(path, "rb") as f:
             await context.bot.send_document(
                 chat_id=chat_id,
@@ -778,7 +778,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await install_command_keyboard(context, chat_id)
     s = STORE.load()
     txt = (
-        f"🆘 Help — MEXC Micro Maker {s.get('bot_version', 'v0015')}\n\n"
+        f"🆘 Help — MEXC Micro Maker {s.get('bot_version', 'v0016')}\n\n"
         "Как запустить в один клик:\n"
         "1) Один раз сохрани API: /api set API_KEY API_SECRET\n"
         "2) Нажми ▶️ Start LIVE на live-панели. По умолчанию включены автоторговля, FULL AUTO поиск монет и OnlyZeroFee.\n\n"
@@ -835,7 +835,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/set private_timeout 15 — timeout приватных REST-запросов\n"
         "/set strict_leverage on — ошибка плеча блокирует сделку, off — не блокирует\n"
         "/set ws_endpoint wss://contract.mexc.com/edge — MEXC futures WS endpoint\n\n"
-        "Кеш в v0015: zero-fee universe пересобирается каждые 60 секунд; если rescan упал, рабочий список не стирается. "
+        "Кеш в v0016: zero-fee universe пересобирается каждые 60 секунд; если rescan упал, рабочий список не стирается. "
         "Монеты, которые регионально запрещены, unsupported или не проходят min/max margin/volume, автоматически уходят в ignore.\n\n"
         "Важно: стопы/тейки виртуальные, их исполняет сам бот. Если процесс выключен, виртуальная защита не работает. "
         "Для полной очистки всегда используй ❌ Close All или /close_all."
