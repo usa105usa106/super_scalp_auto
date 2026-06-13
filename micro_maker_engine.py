@@ -336,7 +336,7 @@ class MicroMakerEngine:
             self._log_error("start_balance_error", e)
         self.task = asyncio.create_task(self._run_loop(), name="micro_maker_loop")
         self._log_event("start_success", start_equity=self.stats.start_equity)
-        return "▶️ Micro Maker LIVE v0017 запущен. WS depth scanner активен, авто-поиск zero-fee монет включён."
+        return "▶️ Micro Maker LIVE v0021 запущен. WS depth scanner активен, авто-поиск zero-fee монет включён."
 
     async def stop(self, close_positions: bool = False) -> str:
         self._log_event("stop_requested", close_positions=close_positions, active_tasks=list(self.active_tasks.keys()))
@@ -420,13 +420,13 @@ class MicroMakerEngine:
         total_losses = int(s.get("total_losses_count") or 0)
         total_pnl = float(s.get("total_estimated_pnl_usdt") or 0.0)
         return (
-            f"🤖 MEXC Micro Maker LIVE {s.get('bot_version', 'v0017')}\n"
+            f"🤖 MEXC Micro Maker LIVE {s.get('bot_version', 'v0021')}\n"
             f"State: {state} | Updated: {last_update}\n"
             f"Uptime: {h:02d}:{m:02d}:{sec:02d}\n\n"
             f"⚙️ {s.get('leverage')}x | Size: {s.get('position_margin_percent', 10)}% total | "
             f"Pos: {s.get('max_positions')} | Symbols: {s.get('symbols_limit')}\n"
             f"🎯 TP/SL: {s.get('target_ticks')}/{s.get('stop_ticks')} ticks | "
-            f"Emergency: {'ON' if s.get('emergency_market_close') else 'OFF'}\n"
+            f"Emergency: {'ON' if s.get('emergency_market_close') else 'OFF'} | Profile: {s.get('trade_profile', '-')}\n"
             f"🔎 Scanner: {'AUTO' if s.get('auto_select_symbols') else 'MANUAL'} | "
             f"ZeroFee: {'ON' if s.get('only_zero_fee') else 'OFF'} | age {age:.1f}s | rescan {s.get('zero_fee_rescan_sec')}s\n"
             f"🌐 Universe: {self.stats.zero_fee_universe_count or len(self.zero_fee_cache)} zero-fee | "
@@ -475,7 +475,7 @@ class MicroMakerEngine:
             "📊 Micro Maker Status\n\n"
             f"State: {'RUNNING' if self.is_running() else 'STOPPED'}\n"
             f"Active tasks: {len(self.active_tasks)} | Current: {', '.join(self.stats.current_symbols) or '-'}\n"
-            f"Version: {s.get('bot_version', 'v0017')}\n"
+            f"Version: {s.get('bot_version', 'v0021')}\n"
             f"Leverage: {s.get('leverage')}x | One trade size: {s.get('position_margin_percent', 10)}% of TOTAL USDT equity\n"
             f"Max positions: {s.get('max_positions')} | Symbols limit: {s.get('symbols_limit')}\n"
             f"Scanner: {'AUTO' if s.get('auto_select_symbols') else 'MANUAL'} | ZeroFee: {'ON' if s.get('only_zero_fee') else 'OFF'} | scan age: {age:.1f}s | rescan: {s.get('zero_fee_rescan_sec')}s\n"
@@ -531,7 +531,7 @@ class MicroMakerEngine:
 
     async def _run_loop(self) -> None:
         self._log_event("run_loop_started")
-        await self._notify("✅ LIVE loop v0017 started. WS depth scanner активен, авто-сканер zero-fee монет включён, TP/SL виртуальные внутри бота.")
+        await self._notify("✅ LIVE loop v0021 started. WS depth scanner активен, авто-сканер zero-fee монет включён, TP/SL виртуальные внутри бота.")
         while self.running:
             try:
                 s = self._settings()
@@ -703,7 +703,7 @@ class MicroMakerEngine:
                 row.update(extra)
                 scan_details.append(row)
 
-        self._log_debug("scan_start", force=force, pool_count=len(pool), pool_first=pool[:30], required_depth=required_depth, margin_usdt=margin_usdt, leverage=leverage, levels=levels, ws_scan_mode=(str(s.get("market_data_mode") or "websocket").lower() == "websocket" and bool(s.get("ws_depth_enabled"))), ws_scan_rest_fallback_limit=s.get("ws_scan_rest_fallback_limit"))
+        self._log_debug("scan_start", force=force, pool_count=len(pool), pool_first=pool[:30], required_depth=required_depth, margin_usdt=margin_usdt, leverage=leverage, levels=levels, min_trade_score=s.get("min_trade_score"), ws_scan_mode=(str(s.get("market_data_mode") or "websocket").lower() == "websocket" and bool(s.get("ws_depth_enabled"))), ws_scan_rest_fallback_limit=s.get("ws_scan_rest_fallback_limit"))
         scored: list[dict[str, Any]] = []
         ws_scan_mode = (
             str(s.get("market_data_mode") or "websocket").lower() == "websocket"
@@ -787,14 +787,23 @@ class MicroMakerEngine:
                 continue
 
         scored.sort(key=lambda r: float(r.get("score") or 0), reverse=True)
+        all_valid_scored = list(scored)
+        min_score = float(s.get("min_trade_score") or 0)
+        if min_score > 0:
+            before_count = len(scored)
+            scored = [r for r in scored if float(r.get("score") or 0) >= min_score]
+            if before_count > len(scored):
+                reject_counts["score"] = reject_counts.get("score", 0) + (before_count - len(scored))
         self.stats.last_scan_ts = now
         self.stats.last_scan_rows = scored
         self.stats.last_scan_reject_counts = dict(reject_counts)
         if scored:
             self.stats.last_action = f"scan: best {scored[0]['symbol']} score={scored[0]['score']:.1f}"
+        elif all_valid_scored:
+            self.stats.last_action = f"scan: valid books below min_score={min_score:g} ({self._format_reject_counts()})"
         else:
             self.stats.last_action = f"scan: no symbol passed filters ({self._format_reject_counts()})"
-        self._log_event("scan_summary", force=force, pool_count=len(pool), valid_count=len(scored), reject_counts=reject_counts, top=scored[:10], details_logged=len(scan_details), details=scan_details)
+        self._log_event("scan_summary", force=force, pool_count=len(pool), valid_count=len(scored), raw_valid_count=len(all_valid_scored), min_trade_score=min_score, reject_counts=reject_counts, top=scored[:10], raw_top=all_valid_scored[:10], details_logged=len(scan_details), details=scan_details)
         return scored
 
     def _apply_switch_guard(self, rows: list[dict[str, Any]], s: dict[str, Any]) -> list[dict[str, Any]]:
@@ -881,6 +890,29 @@ class MicroMakerEngine:
             self.stats.last_action = f"{symbol}: no imbalance"
             self._log_debug("trade_cycle_no_imbalance", symbol=symbol, bid=bid, ask=ask)
             return
+        # v0021 plus mode: recheck the book after a short delay.
+        # This filters out flickering imbalance so the bot opens fewer but cleaner trades.
+        recheck_ms = int(float(s.get("entry_recheck_ms") or 0))
+        if bool(s.get("entry_recheck_required", False)) and recheck_ms > 0:
+            await asyncio.sleep(max(0.0, recheck_ms / 1000.0))
+            book2 = await self._depth(symbol, limit=10)
+            if not book2["bids"] or not book2["asks"]:
+                self.stats.last_action = f"{symbol}: recheck no book"
+                self._log_debug("trade_cycle_recheck_no_book", symbol=symbol, source=book2.get("source"))
+                return
+            bid2, ask2 = book2["bids"][0][0], book2["asks"][0][0]
+            spread_ticks2 = (ask2 - bid2) / max(tick, 1e-12)
+            if spread_ticks2 + 1e-9 < min_spread or spread_ticks2 > max_spread + 1e-9:
+                self.stats.last_action = f"{symbol}: recheck spread reject"
+                self._log_debug("trade_cycle_recheck_spread_reject", symbol=symbol, bid=bid2, ask=ask2, spread_ticks=spread_ticks2, min_spread=min_spread, max_spread=max_spread)
+                return
+            direction2 = await self._choose_direction(symbol, s, book2)
+            if direction2 != direction:
+                self.stats.last_action = f"{symbol}: recheck direction changed {direction}->{direction2}"
+                self._log_debug("trade_cycle_recheck_direction_changed", symbol=symbol, old_direction=direction, new_direction=direction2, bid=bid2, ask=ask2)
+                return
+            bid, ask, book, spread_ticks = bid2, ask2, book2, spread_ticks2
+
         entry_price = bid if direction == "long" else ask
         leverage = int(s.get("leverage") or 5)
         open_type = int(s.get("open_type") or 1)
@@ -903,6 +935,13 @@ class MicroMakerEngine:
                 f"min order too large for 10% rule: desired_margin={margin_usdt:.4f}, "
                 f"min_actual_margin={actual_margin:.4f}"
             )
+            # v0021: if margin was capped by available balance, this is not a bad symbol.
+            # It only means the account is busy: old/manual positions or live orders have
+            # reserved margin. Do not add BTC/SOL/ONDO/etc. to persistent ignored list.
+            if "capped by available balance" in margin_note:
+                self.stats.last_action = f"{symbol}: free margin too low for min order ({reason})"
+                self._log_event("trade_cycle_free_margin_too_low", symbol=symbol, reason=reason, margin_note=margin_note)
+                return
             self._ignore_symbol(symbol, reason)
             self._log_event("trade_cycle_min_order_too_large", symbol=symbol, reason=reason)
             return
@@ -926,6 +965,13 @@ class MicroMakerEngine:
                 self._log_debug("entry_order_cancel_after_lifetime", symbol=symbol, order_id=oid, result=cancel_res)
         except Exception as e:
             self._log_error("entry_order_cancel_error", e, symbol=symbol, order_id=oid)
+            # v0021 safety: if single-order cancel fails, immediately cancel all unfinished
+            # orders for this contract so an unfilled maker order cannot keep margin frozen.
+            try:
+                cleanup_res = await client.cancel_all_orders(symbol)
+                self._log_event("entry_order_cancel_fallback_cancel_all", symbol=symbol, order_id=oid, result=cleanup_res)
+            except Exception as e2:
+                self._log_error("entry_order_cancel_fallback_error", e2, symbol=symbol, order_id=oid)
         pos = await client.find_position(symbol, direction)
         if not pos:
             self.stats.last_action = f"{symbol}: entry not filled"

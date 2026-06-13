@@ -1,9 +1,25 @@
-# MEXC Micro Maker LIVE Bot v0016
+# MEXC Micro Maker LIVE Bot v0021
 
 Отдельный Telegram-бот для live micro-maker / zero-fee scalping на MEXC futures.
 Старые режимы вырезаны. Из старого бота оставлен рабочий механизм MEXC API: подпись запросов, открытие/закрытие сделок, отмена ордеров, баланс, позиции, плечо, zero-fee/fee checks.
 
-## v0018: leverage/rate-limit fix
+## v0021: API input keep-message fix
+
+v0021 keeps API messages in the Telegram chat by request.
+
+Behavior:
+
+```text
+User sends: API_KEY API_SECRET
+Bot saves mexc_api_key/mexc_api_secret in runtime settings
+Bot does NOT delete the user's message
+Bot does NOT clear stored API keys
+Bot replies: ✅ API saved
+```
+
+Previous plus-mode and MEXC order fixes from v0019/v0020 are preserved.
+
+## v0019: leverage/rate-limit fix
 
 v0017 started trading, but MEXC returned `code=2019` (`Leverage adjustment unavailable while orders are open`) and then `code=510` (`Requests are too frequent`).
 
@@ -32,7 +48,7 @@ Telegram commands:
 - MEXC API задаётся только через Telegram: `/api set API_KEY API_SECRET`.
 - MEXC REST/WS endpoint, recv-window, private rate limit, public/private timeout и strict leverage теперь лежат в runtime settings и могут меняться через `/set`.
 - `.env.example` очищен: там оставлены только токен Telegram и admin id.
-- Версия везде обновлена на `v0016`.
+- Версия везде обновлена на `v0021`.
 
 ## Coolify ENV
 
@@ -119,7 +135,7 @@ Inline-кнопки live-панели:
 /log_full clear     очистить полный debug-лог
 /help               инструкция
 
-/api set KEY SECRET сохранить MEXC API, сообщение с ключами удаляется
+/api set KEY SECRET сохранить MEXC API, сообщение с ключами остаётся в чате
 /api status         статус API
 /api clear          удалить API
 

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 DEFAULTS: dict[str, Any] = {
-    "bot_version": "v0018",
+    "bot_version": "v0021",
 
     # secrets are set from Telegram with /api set KEY SECRET. Telegram token stays in ENV.
     "mexc_api_key": "",
@@ -38,11 +38,11 @@ DEFAULTS: dict[str, Any] = {
 
     # micro-maker behavior
     "target_ticks": 1,
-    "stop_ticks": 3,
-    "order_lifetime_ms": 700,
+    "stop_ticks": 2,
+    "order_lifetime_ms": 500,
     "requote_interval_ms": 200,
     "cycle_sleep_ms": 100,
-    "max_position_lifetime_sec": 15,
+    "max_position_lifetime_sec": 10,
     "post_only_entry": True,
     "post_only_close": True,
     "emergency_market_close": True,
@@ -60,18 +60,23 @@ DEFAULTS: dict[str, Any] = {
     "zero_fee_rescan_sec": 60.0,
     # 0 = do not cap universe; active WS/scoring window is max_zero_fee_scan_symbols/ws_depth_max_symbols.
     "zero_fee_universe_max_symbols": 0,
-    "switch_score_improvement_pct": 10.0,
-    "min_symbol_hold_sec": 15.0,
+    "switch_score_improvement_pct": 15.0,
+    "min_symbol_hold_sec": 25.0,
     "min_spread_ticks": 1,
-    "max_spread_ticks": 4,
+    "max_spread_ticks": 1,
     # absolute minimum depth on EACH side of the top book levels.
     # v0017 lowers the old 5000 USDT default because micro accounts trade ~5-10 USDT notional.
-    "min_depth_usdt": 50.0,
+    "min_depth_usdt": 75.0,
     # dynamic minimum: position notional * this multiplier must fit on EACH side
-    "min_depth_multiplier": 3.0,
+    "min_depth_multiplier": 4.0,
     "min_24h_volume_usdt": 0.0,
-    "min_imbalance_ratio": 1.04,
+    "min_imbalance_ratio": 1.30,
     "score_top_levels": 5,
+    # v0021 plus profile: trade only clean, strong books. 0 disables.
+    "min_trade_score": 35.0,
+    "entry_recheck_ms": 180,
+    "entry_recheck_required": True,
+    "trade_profile": "plus_v0021",
     # Persistently ignored symbols: regional restrictions, min/max margin/volume rejects, unsupported contracts.
     "ignored_symbols": {},
     "max_ignored_symbols": 1000,
@@ -91,7 +96,7 @@ DEFAULTS: dict[str, Any] = {
     # risk guard
     "daily_loss_limit_usdt": 2.0,
     "max_consecutive_losses": 5,
-    "max_trades_per_hour": 120,
+    "max_trades_per_hour": 30,
     "stop_on_api_errors": 8,
 
     # Persistent counters. They are updated after every closed trade and survive bot restarts.
@@ -106,6 +111,7 @@ DEFAULTS: dict[str, Any] = {
     "telegram_live_fast_update_sec": 2.0,
     "telegram_live_stopped_update_sec": 0.0,
     "telegram_delete_command_messages": True,
+    "telegram_delete_api_messages": False,
     "telegram_panel_chat_id": 0,
     "telegram_panel_message_id": 0,
     "telegram_panel_mode": "main",  # main | settings | symbols | api
@@ -117,6 +123,38 @@ DEFAULTS: dict[str, Any] = {
     "full_log_enabled": True,
     "full_log_scan_details": True,
     "full_log_scan_symbol_limit": 120,
+}
+
+
+PLUS_PROFILE_V0021: dict[str, Any] = {
+    # High-win-rate / low-frequency profile. It cannot guarantee profit, but it
+    # avoids weak books that made v0017/v0018 take too many marginal trades.
+    "leverage": 5,
+    "position_margin_percent": 10.0,
+    "max_positions": 1,
+    "symbols_limit": 1,
+    "target_ticks": 1,
+    "stop_ticks": 2,
+    "order_lifetime_ms": 500,
+    "requote_interval_ms": 200,
+    "max_position_lifetime_sec": 10,
+    "min_depth_usdt": 75.0,
+    "min_depth_multiplier": 4.0,
+    "min_spread_ticks": 1,
+    "max_spread_ticks": 1,
+    "min_imbalance_ratio": 1.30,
+    "min_trade_score": 35.0,
+    "entry_recheck_ms": 180,
+    "entry_recheck_required": True,
+    "max_trades_per_hour": 30,
+    "max_consecutive_losses": 2,
+    "daily_loss_limit_usdt": 1.0,
+    "switch_score_improvement_pct": 15.0,
+    "min_symbol_hold_sec": 25.0,
+    "mexc_private_rate_limit": 8,
+    "mexc_strict_leverage": False,
+    "mexc_set_leverage_on_entry": False,
+    "trade_profile": "plus_v0021",
 }
 
 
@@ -174,6 +212,17 @@ class ConfigStore:
                     out["mexc_private_rate_limit"] = DEFAULTS["mexc_private_rate_limit"]
         except Exception:
             pass
+        # v0021 migration: user requested a normal higher-quality plus mode.
+        # Apply only strategy/risk filters; never touch API keys, counters, panel ids, or ignored symbols.
+        try:
+            old_ver = str(data.get("bot_version") or "")
+            if old_ver != DEFAULTS["bot_version"] and str(data.get("trade_profile") or "") != "custom":
+                out.update(PLUS_PROFILE_V0021)
+                # Do not carry bad temporary ignores caused by low free margin / old bugs.
+                out["ignored_symbols"] = {}
+        except Exception:
+            pass
+
         out["bot_version"] = DEFAULTS["bot_version"]
         return out
 

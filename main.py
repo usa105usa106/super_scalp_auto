@@ -10,9 +10,9 @@ from typing import Any
 from dotenv import load_dotenv
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
 from telegram.error import BadRequest, Forbidden, TelegramError
-from telegram.ext import Application, ApplicationBuilder, CallbackQueryHandler, CommandHandler, ContextTypes
+from telegram.ext import Application, ApplicationBuilder, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
-from config_store import ConfigStore, DEFAULTS, mask_secret, parse_symbols
+from config_store import ConfigStore, DEFAULTS, PLUS_PROFILE_V0021, mask_secret, parse_symbols
 from micro_maker_engine import MicroMakerEngine
 from mexc_client import MexcFuturesClient
 from full_logger import export_full_log, clear_full_log, log_event, log_error
@@ -189,19 +189,19 @@ def ping_text(update: Update | None = None, started_perf: float | None = None) -
         except Exception:
             telegram_lag = "n/a"
     return (
-        f"🏓 Ping {s.get('bot_version', 'v0017')}\n\n"
+        f"🏓 Ping {s.get('bot_version', 'v0021')}\n\n"
         f"Отклик обработчика: {processing_ms:.1f} ms\n"
         f"Telegram lag: {telegram_lag}\n"
         f"Память: {memory_usage_text()}\n"
         f"Время работы процесса: {format_duration(time.time() - PROCESS_START_TS)}\n"
-        f"Версия: {s.get('bot_version', 'v0017')}"
+        f"Версия: {s.get('bot_version', 'v0021')}"
     )
 
 
 def settings_text() -> str:
     s = STORE.load()
     return (
-        f"⚙️ Micro Maker Settings ({s.get('bot_version', 'v0017')})\n\n"
+        f"⚙️ Micro Maker Settings ({s.get('bot_version', 'v0021')})\n\n"
         f"Leverage: {s['leverage']}x\n"
         f"Max positions: {s['max_positions']}\n"
         f"Symbols limit: {s['symbols_limit']}\n"
@@ -209,6 +209,7 @@ def settings_text() -> str:
         f"Fallback fixed margin: {s['margin_per_position_usdt']} USDT\n"
         f"Target ticks: {s['target_ticks']}\n"
         f"Stop ticks: {s['stop_ticks']}\n"
+        f"Profile: {s.get('trade_profile', '-')} | Min score: {s.get('min_trade_score', 0)} | Recheck: {s.get('entry_recheck_ms', 0)}ms\n"
         f"Order lifetime: {s['order_lifetime_ms']} ms\n"
         f"Requote: {s['requote_interval_ms']} ms\n"
         f"Panel: normal {s.get('telegram_live_update_sec')}s | open {s.get('telegram_live_fast_update_sec')}s | stopped {'OFF' if float(s.get('telegram_live_stopped_update_sec') or 0) <= 0 else str(s.get('telegram_live_stopped_update_sec')) + 's'}\n"
@@ -239,6 +240,7 @@ def settings_menu() -> InlineKeyboardMarkup:
         [b("Panel 2s", "set:telegram_live_update_sec:2"), b("Panel 5s", "set:telegram_live_update_sec:5"), b("Panel 10s", "set:telegram_live_update_sec:10"), b("Stopped OFF", "set:telegram_live_stopped_update_sec:0")],
         [b("Dir BOTH", "set:direction_mode:both"), b("LONG", "set:direction_mode:long"), b("SHORT", "set:direction_mode:short")],
         [b("Emergency ON/OFF", "toggle:emergency_market_close"), b("Post-close ON/OFF", "toggle:post_only_close")],
+        [b("✅ Plus mode v0021", "preset:plus"), b("Custom mode", "preset:custom")],
         [b("⬅️ Back to Live", "menu:main")],
     ])
 
@@ -261,6 +263,7 @@ def symbols_text() -> str:
         f"Zero-fee universe cap: {universe_txt} | Active candidates to score: {s.get('max_zero_fee_scan_symbols')}\n"
         f"Ignored symbols: {ignored_count}\n"
         f"Min spread: {s.get('min_spread_ticks')} ticks | Max spread: {s.get('max_spread_ticks')} ticks\n"
+        f"Min imbalance: {s.get('min_imbalance_ratio')} | Min score: {s.get('min_trade_score')}\n"
         f"Min depth: max({s.get('min_depth_usdt')}$, position_notional × {s.get('min_depth_multiplier')})\n"
         f"Switch threshold: +{s.get('switch_score_improvement_pct')}% | Min hold: {s.get('min_symbol_hold_sec')} sec\n\n"
         f"Allowed symbols / whitelist:\n{allowed}\n\n"
@@ -281,7 +284,9 @@ def symbols_menu() -> InlineKeyboardMarkup:
         [b("WS 30", "set:ws_depth_max_symbols:30"), b("WS 60", "set:ws_depth_max_symbols:60"), b("WS 100", "set:ws_depth_max_symbols:100")],
         [b("Rescan 60s", "set:zero_fee_rescan_sec:60"), b("Clear ignore", "ignore:clear")],
         [b("Depth $25", "set:min_depth_usdt:25"), b("$50", "set:min_depth_usdt:50"), b("$100", "set:min_depth_usdt:100")],
-        [b("Depth x3", "set:min_depth_multiplier:3"), b("x5", "set:min_depth_multiplier:5"), b("x10", "set:min_depth_multiplier:10")],
+        [b("Depth x3", "set:min_depth_multiplier:3"), b("x4", "set:min_depth_multiplier:4"), b("x5", "set:min_depth_multiplier:5")],
+        [b("Imb 1.20", "set:min_imbalance_ratio:1.20"), b("1.30", "set:min_imbalance_ratio:1.30"), b("1.45", "set:min_imbalance_ratio:1.45")],
+        [b("Score 30", "set:min_trade_score:30"), b("35", "set:min_trade_score:35"), b("45", "set:min_trade_score:45")],
         [b("Switch +5%", "set:switch_score_improvement_pct:5"), b("+10%", "set:switch_score_improvement_pct:10"), b("+20%", "set:switch_score_improvement_pct:20")],
         [b("Spread 1-2", "preset:spread:1:2"), b("Spread 1-4", "preset:spread:1:4"), b("Spread 2-6", "preset:spread:2:6")],
         [b("Clear whitelist", "symbols:clear"), b("⬅️ Back to Live", "menu:main")],
@@ -297,7 +302,7 @@ def api_text() -> str:
         "Сохранить: /api set API_KEY API_SECRET\n"
         "Проверить: /api status\n"
         "Удалить: /api clear\n\n"
-        "В v0017 команда /api set автоматически удаляется из чата, чтобы ключи не висели в истории."
+        "В v0021 ввод API НЕ удаляется из чата: бот сохраняет ключи, оставляет сообщение и отвечает коротко: ✅ API saved."
     )
 
 
@@ -323,7 +328,7 @@ def panel_text(engine: MicroMakerEngine | None = None) -> str:
         return e.quick_status_text()
     s = STORE.load()
     return (
-        f"🤖 MEXC Micro Maker LIVE {s.get('bot_version', 'v0017')}\n"
+        f"🤖 MEXC Micro Maker LIVE {s.get('bot_version', 'v0021')}\n"
         "State: STOPPED\n\n"
         f"⚙️ {s.get('leverage')}x | Size: {s.get('position_margin_percent', 10)}% total | "
         f"Pos: {s.get('max_positions')} | Symbols: {s.get('symbols_limit')}\n"
@@ -332,17 +337,30 @@ def panel_text(engine: MicroMakerEngine | None = None) -> str:
     )
 
 
-async def safe_delete_message(context: ContextTypes.DEFAULT_TYPE, update: Update) -> None:
+async def safe_delete_message(context: ContextTypes.DEFAULT_TYPE, update: Update, *, retries: bool = False) -> bool:
     s = STORE.load()
     if not bool(s.get("telegram_delete_command_messages")):
-        return
+        return False
     msg = update.effective_message
     if not msg or not update.effective_chat:
-        return
-    try:
-        await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=msg.message_id)
-    except TelegramError:
-        pass
+        return False
+    chat_id = update.effective_chat.id
+    message_id = msg.message_id
+    delays = [0.0, 0.35, 1.2] if retries else [0.0]
+    last_error: Exception | None = None
+    for delay in delays:
+        try:
+            if delay > 0:
+                await asyncio.sleep(delay)
+            await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+            return True
+        except TelegramError as e:
+            last_error = e
+        except Exception as e:
+            last_error = e
+    if retries and last_error:
+        log_error("telegram_delete_sensitive_message_failed", last_error, chat_id=chat_id, message_id=message_id)
+    return False
 
 
 async def set_panel_identity(chat_id: int, message_id: int, mode: str = "main") -> None:
@@ -450,7 +468,7 @@ async def update_live_panel(app: Application, force: bool = False) -> None:
 async def live_panel_loop(app: Application) -> None:
     """Smart live-panel refresh.
 
-    Defaults in v0017:
+    Defaults in v0021:
     - STOPPED: no automatic refresh, so the panel is readable and quiet.
     - RUNNING without an open position: every 5 seconds.
     - RUNNING with an open position: every 2 seconds.
@@ -518,7 +536,8 @@ async def panel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def api_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await safe_delete_message(context, update)
+    # v0021: user's API input message must remain in Telegram chat history.
+    # Save keys into settings only; do NOT call safe_delete_message here.
     chat_id = update.effective_chat.id if update.effective_chat else None
     if not chat_id:
         return
@@ -528,16 +547,78 @@ async def api_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     if args[0].lower() == "set":
         if len(args) < 3:
-            await upsert_panel(context, chat_id, "Usage: /api set API_KEY API_SECRET", main_menu(), mode="api")
+            await context.bot.send_message(chat_id=chat_id, text="Usage: /api set API_KEY API_SECRET")
             return
         STORE.update({"mexc_api_key": args[1].strip(), "mexc_api_secret": args[2].strip()})
-        await upsert_panel(context, chat_id, "✅ MEXC API сохранён. Сообщение с ключами удалено из чата.\n\n" + api_text(), main_menu(), mode="api")
+        log_event("api_saved_keep_chat_message", mode="command_set")
+        await context.bot.send_message(chat_id=chat_id, text="✅ API saved")
         return
     if args[0].lower() == "clear":
         STORE.update({"mexc_api_key": "", "mexc_api_secret": ""})
         await upsert_panel(context, chat_id, "✅ MEXC API удалён.\n\n" + api_text(), main_menu(), mode="api")
         return
     await upsert_panel(context, chat_id, "Usage: /api set API_KEY API_SECRET | /api status | /api clear", main_menu(), mode="api")
+
+
+def _parse_api_plain_text(text: str) -> tuple[str, str] | None:
+    raw = " ".join(str(text or "").strip().split())
+    if not raw:
+        return None
+    low = raw.lower()
+    for prefix in ("/api set ", "api set ", "mexc api ", "api "):
+        if low.startswith(prefix):
+            raw = raw[len(prefix):].strip()
+            break
+    parts = raw.split()
+    if len(parts) < 2:
+        return None
+    key, secret = parts[0].strip(), parts[1].strip()
+    if len(key) < 8 or len(secret) < 8:
+        return None
+    # MEXC keys often start with mx, but do not require that strictly because
+    # accounts/regions can vary. Require both tokens to be long enough instead.
+    return key, secret
+
+
+async def api_plaintext_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Allows the user to open 🔑 API and paste "KEY SECRET" without /api set.
+    # v0021: keep that pasted message in Telegram chat history by request.
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if not chat_id or not update.effective_message or not update.effective_message.text:
+        return
+    s = STORE.load()
+    text = update.effective_message.text.strip()
+    low = text.lower()
+    in_api_mode = str(s.get("telegram_panel_mode") or "") == "api"
+    if not in_api_mode and not low.startswith(("api set ", "mexc api ", "api ")):
+        return
+    parsed = _parse_api_plain_text(text)
+    if not parsed:
+        return
+    key, secret = parsed
+    STORE.update({"mexc_api_key": key, "mexc_api_secret": secret})
+    log_event("api_saved_keep_chat_message", mode="plain_text")
+    await context.bot.send_message(chat_id=chat_id, text="✅ API saved")
+
+
+def apply_plus_profile() -> None:
+    STORE.update(dict(PLUS_PROFILE_V0021))
+
+
+async def preset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await safe_delete_message(context, update)
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if not chat_id:
+        return
+    args = [a.lower() for a in (context.args or [])]
+    if args and args[0] in {"custom", "manual"}:
+        STORE.set("trade_profile", "custom")
+        await upsert_panel(context, chat_id, "✅ Custom mode включён: дальше /set не будет перетираться миграцией профиля.\n\n" + settings_text(), settings_menu(), mode="settings")
+        return
+    apply_plus_profile()
+    engine = await ensure_engine(context, chat_id)
+    engine.clear_ignored_symbols()
+    await upsert_panel(context, chat_id, "✅ Plus mode v0021 применён: меньше сделок, сильнее фильтры, цель — брать только чистые стаканы.\n\n" + settings_text(), settings_menu(), mode="settings")
 
 
 async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -564,6 +645,12 @@ async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "depth": "min_depth_usdt",
         "depth_usdt": "min_depth_usdt",
         "depthx": "min_depth_multiplier",
+        "imb": "min_imbalance_ratio",
+        "imbalance": "min_imbalance_ratio",
+        "score": "min_trade_score",
+        "min_score": "min_trade_score",
+        "recheck": "entry_recheck_ms",
+        "recheck_ms": "entry_recheck_ms",
         "switch": "switch_score_improvement_pct",
         "md": "market_data_mode",
         "ws": "ws_depth_enabled",
@@ -603,7 +690,7 @@ async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         else:
             val = raw
         STORE.set(key, val)
-        if key in {"scan_interval_sec", "max_zero_fee_scan_symbols", "zero_fee_rescan_sec", "zero_fee_universe_max_symbols", "min_depth_usdt", "min_depth_multiplier", "switch_score_improvement_pct", "market_data_mode", "ws_depth_enabled", "ws_depth_max_symbols", "ws_book_stale_ms"}:
+        if key in {"scan_interval_sec", "max_zero_fee_scan_symbols", "zero_fee_rescan_sec", "zero_fee_universe_max_symbols", "min_depth_usdt", "min_depth_multiplier", "switch_score_improvement_pct", "min_imbalance_ratio", "min_trade_score", "entry_recheck_ms", "entry_recheck_required", "market_data_mode", "ws_depth_enabled", "ws_depth_max_symbols", "ws_book_stale_ms"}:
             await upsert_panel(context, chat_id, f"✅ {key} = {val}\n\n" + symbols_text(), symbols_menu(), mode="symbols")
         else:
             await upsert_panel(context, chat_id, f"✅ {key} = {val}\n\n" + settings_text(), settings_menu(), mode="settings")
@@ -701,9 +788,8 @@ async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     chat_id = update.effective_chat.id if update.effective_chat else None
     if not chat_id:
         return
-    await install_command_keyboard(context, chat_id)
     engine = await ensure_engine(context, chat_id)
-    await upsert_panel(context, chat_id, await balance_text(engine), main_menu(), mode="main")
+    await context.bot.send_message(chat_id=chat_id, text=(await balance_text(engine))[:3900])
 
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -761,7 +847,7 @@ async def log_full_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     try:
         log_event("log_full_export_requested", chat_id=chat_id)
         path = export_full_log(STORE.load(), engine)
-        caption = f"📄 Full debug log {STORE.load().get('bot_version', 'v0017')}\nОшибки, скан монет, переключения, ордера, закрытия и MEXC API-события."
+        caption = f"📄 Full debug log {STORE.load().get('bot_version', 'v0021')}\nОшибки, скан монет, переключения, ордера, закрытия и MEXC API-события."
         with open(path, "rb") as f:
             await context.bot.send_document(
                 chat_id=chat_id,
@@ -783,7 +869,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await install_command_keyboard(context, chat_id)
     s = STORE.load()
     txt = (
-        f"🆘 Help — MEXC Micro Maker {s.get('bot_version', 'v0017')}\n\n"
+        f"🆘 Help — MEXC Micro Maker {s.get('bot_version', 'v0021')}\n\n"
         "Как запустить в один клик:\n"
         "1) Один раз сохрани API: /api set API_KEY API_SECRET\n"
         "2) Нажми ▶️ Start LIVE на live-панели. По умолчанию включены автоторговля, FULL AUTO поиск монет и OnlyZeroFee.\n\n"
@@ -807,7 +893,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Coolify ENV:\n"
         "В Coolify нужны только TELEGRAM_BOT_TOKEN и ADMIN_IDS. Остальные MEXC/сканер/риск настройки уже заданы по умолчанию и меняются через Telegram.\n\n"
         "API:\n"
-        "/api set API_KEY API_SECRET — сохранить MEXC API, сообщение с ключами удаляется из чата\n"
+        "/api set API_KEY API_SECRET — сохранить MEXC API; сообщение с ключами остаётся в чате\n"
         "/api status — показать, сохранены ли ключи\n"
         "/api clear — удалить API-ключи из настроек\n\n"
         "Монеты и сканер:\n"
@@ -840,7 +926,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/set private_timeout 15 — timeout приватных REST-запросов\n"
         "/set strict_leverage on — ошибка плеча блокирует сделку, off — не блокирует\n"
         "/set ws_endpoint wss://contract.mexc.com/edge — MEXC futures WS endpoint\n\n"
-        "Кеш в v0017: zero-fee universe пересобирается каждые 60 секунд; если rescan упал, рабочий список не стирается. "
+        "Кеш в v0021: zero-fee universe пересобирается каждые 60 секунд; если rescan упал, рабочий список не стирается. "
         "Монеты, которые регионально запрещены, unsupported или не проходят min/max margin/volume, автоматически уходят в ignore.\n\n"
         "Важно: стопы/тейки виртуальные, их исполняет сам бот. Если процесс выключен, виртуальная защита не работает. "
         "Для полной очистки всегда используй ❌ Close All или /close_all."
@@ -886,7 +972,8 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await edit_query_as_panel(q, await engine.scan_now_text(), symbols_menu(), mode="symbols")
         return
     if data == "mm:balance":
-        await edit_query_as_panel(q, await balance_text(engine), main_menu(), mode="main")
+        if chat_id:
+            await context.bot.send_message(chat_id=chat_id, text=(await balance_text(engine))[:3900])
         return
     if data == "mm:trades":
         await edit_query_as_panel(q, engine.trades_counter_text(), main_menu(), mode="main")
@@ -908,6 +995,15 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if data == "ignore:clear":
         msg = engine.clear_ignored_symbols()
         await edit_query_as_panel(q, msg + "\n\n" + symbols_text(), symbols_menu(), mode="symbols")
+        return
+    if data == "preset:plus":
+        apply_plus_profile()
+        engine.clear_ignored_symbols()
+        await edit_query_as_panel(q, "✅ Plus mode v0021 применён.\n\n" + settings_text(), settings_menu(), mode="settings")
+        return
+    if data == "preset:custom":
+        STORE.set("trade_profile", "custom")
+        await edit_query_as_panel(q, "✅ Custom mode включён.\n\n" + settings_text(), settings_menu(), mode="settings")
         return
     if data.startswith("preset:spread:"):
         _, _, mn, mx = data.split(":", 3)
@@ -936,7 +1032,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             else:
                 value = raw
             STORE.set(key, value)
-            if key in {"scan_interval_sec", "max_zero_fee_scan_symbols", "zero_fee_rescan_sec", "zero_fee_universe_max_symbols", "min_depth_usdt", "min_depth_multiplier", "switch_score_improvement_pct", "min_spread_ticks", "max_spread_ticks", "market_data_mode", "ws_depth_enabled", "ws_depth_max_symbols", "ws_book_stale_ms"}:
+            if key in {"scan_interval_sec", "max_zero_fee_scan_symbols", "zero_fee_rescan_sec", "zero_fee_universe_max_symbols", "min_depth_usdt", "min_depth_multiplier", "switch_score_improvement_pct", "min_spread_ticks", "max_spread_ticks", "min_imbalance_ratio", "min_trade_score", "entry_recheck_ms", "entry_recheck_required", "market_data_mode", "ws_depth_enabled", "ws_depth_max_symbols", "ws_book_stale_ms"}:
                 await edit_query_as_panel(q, symbols_text(), symbols_menu(), mode="symbols")
             else:
                 await edit_query_as_panel(q, settings_text(), settings_menu(), mode="settings")
@@ -958,6 +1054,7 @@ async def post_init(app: Application) -> None:
             BotCommand("trades", "Счётчик сделок"),
             BotCommand("log_full", "Полный .txt лог для диагностики"),
             BotCommand("help", "Справка"),
+            BotCommand("preset", "Plus/custom профиль"),
         ])
     except TelegramError:
         pass
@@ -989,12 +1086,14 @@ def main() -> None:
     app.add_handler(CommandHandler("help", admin_guard(help_cmd)))
     app.add_handler(CommandHandler("panel", admin_guard(panel_cmd)))
     app.add_handler(CommandHandler("api", admin_guard(api_cmd)))
+    app.add_handler(CommandHandler("preset", admin_guard(preset_cmd)))
     app.add_handler(CommandHandler("set", admin_guard(set_cmd)))
     app.add_handler(CommandHandler("symbols", admin_guard(symbols_cmd)))
     app.add_handler(CommandHandler("ignore", admin_guard(ignore_cmd)))
     app.add_handler(CommandHandler("close_all", admin_guard(close_all_cmd)))
     app.add_handler(CommandHandler("closeall", admin_guard(close_all_cmd)))
     app.add_handler(CallbackQueryHandler(admin_guard(callback)))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_guard(api_plaintext_cmd)))
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 

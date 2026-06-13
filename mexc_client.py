@@ -530,7 +530,7 @@ class MexcFuturesClient:
         sid = self.contract_id(symbol)
         leverage = max(1, int(leverage or 1))
 
-        # v0018: MEXC rejects leverage changes while any order is open for the symbol
+        # v0021: MEXC rejects leverage changes while any order is open for the symbol
         # (code 2019). The order/create endpoint already includes leverage, so this
         # method is optional and disabled by default via mexc_set_leverage_on_entry.
         if not self._bool_setting("mexc_set_leverage_on_entry", "MEXC_SET_LEVERAGE_ON_ENTRY", False):
@@ -597,7 +597,7 @@ class MexcFuturesClient:
     async def open_post_only(self, symbol: str, direction: str, vol: int, price: float, leverage: int, open_type: int = 1) -> dict[str, Any]:
         # 1 open long, 3 open short; type 2 post-only maker-only.
         side_code = 1 if direction == "long" else 3
-        # set_leverage is skipped by default in v0018; order/create carries leverage.
+        # set_leverage is skipped by default in v0021; order/create carries leverage.
         await self.set_leverage(symbol, leverage, open_type)
         px = await self.round_price(symbol, price, "floor" if direction == "long" else "ceil")
         return await self.place_order(symbol, side_code, 2, vol, px, leverage, open_type, external_oid=f"mm_open_{int(time.time()*1000)%10**10}")
@@ -621,12 +621,15 @@ class MexcFuturesClient:
         oid = str(order_id or "").split(":", 1)[0].strip()
         if not oid:
             return {"ok": False, "reason": "empty order_id"}
-        body: dict[str, Any] = {"orderId": int(oid) if oid.isdigit() else oid}
-        if symbol:
-            body["symbol"] = self.contract_id(symbol)
-        log_event("mexc_cancel_order_request", body=body)
+
+        # v0021: MEXC Futures Cancel Orders endpoint expects a JSON LIST of order ids
+        # (List<Long>, max 50). v0018 sent {"orderId": id, "symbol": ...}, which MEXC
+        # answers with code 600 Parameter error. That left maker entry orders alive and
+        # reserved margin, so the next loops had almost no available balance.
+        body: list[int | str] = [int(oid) if oid.isdigit() else oid]
+        log_event("mexc_cancel_order_request", body=body, symbol=self.contract_id(symbol) if symbol else "")
         res = await self.private("POST", "/api/v1/private/order/cancel", body=body)
-        log_event("mexc_cancel_order_response", body=body, response=res)
+        log_event("mexc_cancel_order_response", body=body, symbol=self.contract_id(symbol) if symbol else "", response=res)
         return res
 
     async def cancel_all_orders(self, symbol: str | None = None) -> dict[str, Any]:
