@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 DEFAULTS: dict[str, Any] = {
-    "bot_version": "v0016",
+    "bot_version": "v0017",
 
     # secrets are set from Telegram with /api set KEY SECRET. Telegram token stays in ENV.
     "mexc_api_key": "",
@@ -61,8 +61,9 @@ DEFAULTS: dict[str, Any] = {
     "min_symbol_hold_sec": 15.0,
     "min_spread_ticks": 1,
     "max_spread_ticks": 4,
-    # absolute minimum depth on EACH side of the top book levels
-    "min_depth_usdt": 5000.0,
+    # absolute minimum depth on EACH side of the top book levels.
+    # v0017 lowers the old 5000 USDT default because micro accounts trade ~5-10 USDT notional.
+    "min_depth_usdt": 50.0,
     # dynamic minimum: position notional * this multiplier must fit on EACH side
     "min_depth_multiplier": 3.0,
     "min_24h_volume_usdt": 0.0,
@@ -145,6 +146,17 @@ class ConfigStore:
             data = {}
         out = dict(DEFAULTS)
         out.update(data)
+
+        # v0017 migration: v0015/v0016 shipped with min_depth_usdt=5000.
+        # That blocks all micro-maker candidates on small accounts. If the stored
+        # value is exactly the old default, migrate it to the new micro default.
+        try:
+            old_ver = str(data.get("bot_version") or "")
+            if old_ver != DEFAULTS["bot_version"] and float(data.get("min_depth_usdt", 5000.0)) == 5000.0:
+                out["min_depth_usdt"] = DEFAULTS["min_depth_usdt"]
+        except Exception:
+            pass
+        out["bot_version"] = DEFAULTS["bot_version"]
         return out
 
     def save(self, data: dict[str, Any]) -> None:

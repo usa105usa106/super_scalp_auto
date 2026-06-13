@@ -189,19 +189,19 @@ def ping_text(update: Update | None = None, started_perf: float | None = None) -
         except Exception:
             telegram_lag = "n/a"
     return (
-        f"🏓 Ping {s.get('bot_version', 'v0016')}\n\n"
+        f"🏓 Ping {s.get('bot_version', 'v0017')}\n\n"
         f"Отклик обработчика: {processing_ms:.1f} ms\n"
         f"Telegram lag: {telegram_lag}\n"
         f"Память: {memory_usage_text()}\n"
         f"Время работы процесса: {format_duration(time.time() - PROCESS_START_TS)}\n"
-        f"Версия: {s.get('bot_version', 'v0016')}"
+        f"Версия: {s.get('bot_version', 'v0017')}"
     )
 
 
 def settings_text() -> str:
     s = STORE.load()
     return (
-        f"⚙️ Micro Maker Settings ({s.get('bot_version', 'v0016')})\n\n"
+        f"⚙️ Micro Maker Settings ({s.get('bot_version', 'v0017')})\n\n"
         f"Leverage: {s['leverage']}x\n"
         f"Max positions: {s['max_positions']}\n"
         f"Symbols limit: {s['symbols_limit']}\n"
@@ -280,6 +280,7 @@ def symbols_menu() -> InlineKeyboardMarkup:
         [b("Candidates 30", "set:max_zero_fee_scan_symbols:30"), b("60", "set:max_zero_fee_scan_symbols:60"), b("100", "set:max_zero_fee_scan_symbols:100")],
         [b("WS 30", "set:ws_depth_max_symbols:30"), b("WS 60", "set:ws_depth_max_symbols:60"), b("WS 100", "set:ws_depth_max_symbols:100")],
         [b("Rescan 60s", "set:zero_fee_rescan_sec:60"), b("Clear ignore", "ignore:clear")],
+        [b("Depth $25", "set:min_depth_usdt:25"), b("$50", "set:min_depth_usdt:50"), b("$100", "set:min_depth_usdt:100")],
         [b("Depth x3", "set:min_depth_multiplier:3"), b("x5", "set:min_depth_multiplier:5"), b("x10", "set:min_depth_multiplier:10")],
         [b("Switch +5%", "set:switch_score_improvement_pct:5"), b("+10%", "set:switch_score_improvement_pct:10"), b("+20%", "set:switch_score_improvement_pct:20")],
         [b("Spread 1-2", "preset:spread:1:2"), b("Spread 1-4", "preset:spread:1:4"), b("Spread 2-6", "preset:spread:2:6")],
@@ -296,7 +297,7 @@ def api_text() -> str:
         "Сохранить: /api set API_KEY API_SECRET\n"
         "Проверить: /api status\n"
         "Удалить: /api clear\n\n"
-        "В v0016 команда /api set автоматически удаляется из чата, чтобы ключи не висели в истории."
+        "В v0017 команда /api set автоматически удаляется из чата, чтобы ключи не висели в истории."
     )
 
 
@@ -322,7 +323,7 @@ def panel_text(engine: MicroMakerEngine | None = None) -> str:
         return e.quick_status_text()
     s = STORE.load()
     return (
-        f"🤖 MEXC Micro Maker LIVE {s.get('bot_version', 'v0016')}\n"
+        f"🤖 MEXC Micro Maker LIVE {s.get('bot_version', 'v0017')}\n"
         "State: STOPPED\n\n"
         f"⚙️ {s.get('leverage')}x | Size: {s.get('position_margin_percent', 10)}% total | "
         f"Pos: {s.get('max_positions')} | Symbols: {s.get('symbols_limit')}\n"
@@ -449,7 +450,7 @@ async def update_live_panel(app: Application, force: bool = False) -> None:
 async def live_panel_loop(app: Application) -> None:
     """Smart live-panel refresh.
 
-    Defaults in v0016:
+    Defaults in v0017:
     - STOPPED: no automatic refresh, so the panel is readable and quiet.
     - RUNNING without an open position: every 5 seconds.
     - RUNNING with an open position: every 2 seconds.
@@ -560,6 +561,8 @@ async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "life": "order_lifetime_ms",
         "scan": "scan_interval_sec",
         "candidates": "max_zero_fee_scan_symbols",
+        "depth": "min_depth_usdt",
+        "depth_usdt": "min_depth_usdt",
         "depthx": "min_depth_multiplier",
         "switch": "switch_score_improvement_pct",
         "md": "market_data_mode",
@@ -598,7 +601,7 @@ async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         else:
             val = raw
         STORE.set(key, val)
-        if key in {"scan_interval_sec", "max_zero_fee_scan_symbols", "zero_fee_rescan_sec", "zero_fee_universe_max_symbols", "min_depth_multiplier", "switch_score_improvement_pct", "market_data_mode", "ws_depth_enabled", "ws_depth_max_symbols", "ws_book_stale_ms"}:
+        if key in {"scan_interval_sec", "max_zero_fee_scan_symbols", "zero_fee_rescan_sec", "zero_fee_universe_max_symbols", "min_depth_usdt", "min_depth_multiplier", "switch_score_improvement_pct", "market_data_mode", "ws_depth_enabled", "ws_depth_max_symbols", "ws_book_stale_ms"}:
             await upsert_panel(context, chat_id, f"✅ {key} = {val}\n\n" + symbols_text(), symbols_menu(), mode="symbols")
         else:
             await upsert_panel(context, chat_id, f"✅ {key} = {val}\n\n" + settings_text(), settings_menu(), mode="settings")
@@ -756,7 +759,7 @@ async def log_full_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     try:
         log_event("log_full_export_requested", chat_id=chat_id)
         path = export_full_log(STORE.load(), engine)
-        caption = f"📄 Full debug log {STORE.load().get('bot_version', 'v0016')}\nОшибки, скан монет, переключения, ордера, закрытия и MEXC API-события."
+        caption = f"📄 Full debug log {STORE.load().get('bot_version', 'v0017')}\nОшибки, скан монет, переключения, ордера, закрытия и MEXC API-события."
         with open(path, "rb") as f:
             await context.bot.send_document(
                 chat_id=chat_id,
@@ -778,7 +781,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await install_command_keyboard(context, chat_id)
     s = STORE.load()
     txt = (
-        f"🆘 Help — MEXC Micro Maker {s.get('bot_version', 'v0016')}\n\n"
+        f"🆘 Help — MEXC Micro Maker {s.get('bot_version', 'v0017')}\n\n"
         "Как запустить в один клик:\n"
         "1) Один раз сохрани API: /api set API_KEY API_SECRET\n"
         "2) Нажми ▶️ Start LIVE на live-панели. По умолчанию включены автоторговля, FULL AUTO поиск монет и OnlyZeroFee.\n\n"
@@ -835,7 +838,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/set private_timeout 15 — timeout приватных REST-запросов\n"
         "/set strict_leverage on — ошибка плеча блокирует сделку, off — не блокирует\n"
         "/set ws_endpoint wss://contract.mexc.com/edge — MEXC futures WS endpoint\n\n"
-        "Кеш в v0016: zero-fee universe пересобирается каждые 60 секунд; если rescan упал, рабочий список не стирается. "
+        "Кеш в v0017: zero-fee universe пересобирается каждые 60 секунд; если rescan упал, рабочий список не стирается. "
         "Монеты, которые регионально запрещены, unsupported или не проходят min/max margin/volume, автоматически уходят в ignore.\n\n"
         "Важно: стопы/тейки виртуальные, их исполняет сам бот. Если процесс выключен, виртуальная защита не работает. "
         "Для полной очистки всегда используй ❌ Close All или /close_all."
@@ -931,7 +934,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             else:
                 value = raw
             STORE.set(key, value)
-            if key in {"scan_interval_sec", "max_zero_fee_scan_symbols", "zero_fee_rescan_sec", "zero_fee_universe_max_symbols", "min_depth_multiplier", "switch_score_improvement_pct", "min_spread_ticks", "max_spread_ticks", "market_data_mode", "ws_depth_enabled", "ws_depth_max_symbols", "ws_book_stale_ms"}:
+            if key in {"scan_interval_sec", "max_zero_fee_scan_symbols", "zero_fee_rescan_sec", "zero_fee_universe_max_symbols", "min_depth_usdt", "min_depth_multiplier", "switch_score_improvement_pct", "min_spread_ticks", "max_spread_ticks", "market_data_mode", "ws_depth_enabled", "ws_depth_max_symbols", "ws_book_stale_ms"}:
                 await edit_query_as_panel(q, symbols_text(), symbols_menu(), mode="symbols")
             else:
                 await edit_query_as_panel(q, settings_text(), settings_menu(), mode="settings")

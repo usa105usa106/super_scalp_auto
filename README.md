@@ -1,12 +1,9 @@
-# MEXC Micro Maker LIVE Bot v0016
+# MEXC Micro Maker LIVE Bot v0017
 
 Отдельный Telegram-бот для live micro-maker / zero-fee scalping на MEXC futures.
 Старые режимы вырезаны. Из старого бота оставлен рабочий механизм MEXC API: подпись запросов, открытие/закрытие сделок, отмена ордеров, баланс, позиции, плечо, zero-fee/fee checks.
 
-## Что изменено в v0016
-
-- Исправлен zero-fee scanner: теперь основная проверка идёт через `/api/v1/private/account/contract/zero_fee_rate`, затем fallback через `/api/v1/private/account/contract/fee_rate`, и только потом старые account-level fee endpoints.
-- Добавлен маппинг `contractId -> SYMBOL_USDT` через публичный `/api/v1/contract/detail`, потому что zero-fee endpoint возвращает contractId.
+## Что изменено в v0017
 
 - Для Coolify теперь нужны только 2 переменные окружения:
   - `TELEGRAM_BOT_TOKEN`
@@ -15,7 +12,7 @@
 - MEXC API задаётся только через Telegram: `/api set API_KEY API_SECRET`.
 - MEXC REST/WS endpoint, recv-window, private rate limit, public/private timeout и strict leverage теперь лежат в runtime settings и могут меняться через `/set`.
 - `.env.example` очищен: там оставлены только токен Telegram и admin id.
-- Версия везде обновлена на `v0016`.
+- Версия везде обновлена на `v0017`.
 
 ## Coolify ENV
 
@@ -155,3 +152,11 @@ Inline-кнопки live-панели:
 - Стопы и тейки виртуальные: их исполняет сам бот. Если процесс/сервер упал, виртуальная защита не работает.
 - Перед нормальной торговлей проверь `/balance`, `/log_full clear`, 1–2 сделки минимальным объёмом, потом `/close_all` и `/log_full`.
 - `ADMIN_IDS` лучше обязательно указать, чтобы чужие пользователи не могли управлять ботом.
+
+
+## v0017 notes
+
+- Fixes the next bottleneck seen after v0016: `min_depth_usdt=5000` was too high for a micro account and rejected every symbol even when zero-fee + WS were working. New default is `50` USDT per side; if an existing runtime config still has the old default `5000`, v0017 migrates it to `50`.
+- Adds Scanner/Symbols buttons for absolute depth: `$25`, `$50`, `$100`. Command aliases: `/set depth 50` or `/set min_depth_usdt 50`.
+- Filters symbols containing `STOCK` out of the auto universe, while leaving non-STOCK metals/oil/index/crypto symbols allowed.
+- Live panel now shows reject counts, e.g. `Rejects: depth=60, spread=18`.

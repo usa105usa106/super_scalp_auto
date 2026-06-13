@@ -30,6 +30,7 @@ class EngineStats:
     current_symbols: list[str] = field(default_factory=list)
     last_scan_ts: float = 0.0
     last_scan_rows: list[dict[str, Any]] = field(default_factory=list)
+    last_scan_reject_counts: dict[str, int] = field(default_factory=dict)
     open_position_symbols: list[str] = field(default_factory=list)
     market_data_source: str = "REST"
     ws_books: int = 0
@@ -88,6 +89,12 @@ class MicroMakerEngine:
     def _is_ignored_symbol(self, symbol: str, s: dict[str, Any] | None = None) -> bool:
         sid = MexcFuturesClient.contract_id(symbol)
         return sid in self._ignored_symbols(s)
+
+    @staticmethod
+    def _blocked_symbol(symbol: str) -> bool:
+        # Per strategy rule: symbols containing STOCK are blocked. Metals, oil,
+        # indexes and tokenized tickers without this substring remain allowed.
+        return "STOCK" in str(symbol or "").upper()
 
     def _ignore_symbol(self, symbol: str, reason: str) -> None:
         """Persistently remove a bad symbol from scanner/trading.
@@ -329,7 +336,7 @@ class MicroMakerEngine:
             self._log_error("start_balance_error", e)
         self.task = asyncio.create_task(self._run_loop(), name="micro_maker_loop")
         self._log_event("start_success", start_equity=self.stats.start_equity)
-        return "▶️ Micro Maker LIVE v0016 запущен. WS depth scanner активен, авто-поиск zero-fee монет включён."
+        return "▶️ Micro Maker LIVE v0017 запущен. WS depth scanner активен, авто-поиск zero-fee монет включён."
 
     async def stop(self, close_positions: bool = False) -> str:
         self._log_event("stop_requested", close_positions=close_positions, active_tasks=list(self.active_tasks.keys()))
@@ -403,6 +410,7 @@ class MicroMakerEngine:
         sec = int(uptime % 60)
         age = time.time() - self.stats.last_scan_ts if self.stats.last_scan_ts else 0.0
         top = self._format_scan_rows(limit=5)
+        rejects = self._format_reject_counts()
         current = ", ".join(self.stats.current_symbols) or "-"
         opened = ", ".join(self.stats.open_position_symbols) or "-"
         state = "RUNNING" if self.is_running() else "STOPPED"
@@ -412,7 +420,7 @@ class MicroMakerEngine:
         total_losses = int(s.get("total_losses_count") or 0)
         total_pnl = float(s.get("total_estimated_pnl_usdt") or 0.0)
         return (
-            f"🤖 MEXC Micro Maker LIVE {s.get('bot_version', 'v0016')}\n"
+            f"🤖 MEXC Micro Maker LIVE {s.get('bot_version', 'v0017')}\n"
             f"State: {state} | Updated: {last_update}\n"
             f"Uptime: {h:02d}:{m:02d}:{sec:02d}\n\n"
             f"⚙️ {s.get('leverage')}x | Size: {s.get('position_margin_percent', 10)}% total | "
@@ -432,7 +440,8 @@ class MicroMakerEngine:
             f"Loss streak: {self.stats.consecutive_losses} | API errors: {self.stats.api_errors}\n"
             f"Last: {self.stats.last_action or '-'}\n"
             f"Error: {self.stats.last_error or '-'}\n\n"
-            f"🏆 Top scan:\n{top}"
+            f"🏆 Top scan:\n{top}\n"
+            f"Rejects: {rejects}"
         )
 
     async def status_text(self) -> str:
@@ -456,6 +465,7 @@ class MicroMakerEngine:
             except Exception as e:
                 pos_txt = f"positions error: {str(e)[:120]}"
         top = self._format_scan_rows(limit=5)
+        rejects = self._format_reject_counts()
         age = time.time() - self.stats.last_scan_ts if self.stats.last_scan_ts else 0
         total_trades = int(s.get("total_trades_count") or 0)
         total_wins = int(s.get("total_wins_count") or 0)
@@ -465,7 +475,7 @@ class MicroMakerEngine:
             "📊 Micro Maker Status\n\n"
             f"State: {'RUNNING' if self.is_running() else 'STOPPED'}\n"
             f"Active tasks: {len(self.active_tasks)} | Current: {', '.join(self.stats.current_symbols) or '-'}\n"
-            f"Version: {s.get('bot_version', 'v0016')}\n"
+            f"Version: {s.get('bot_version', 'v0017')}\n"
             f"Leverage: {s.get('leverage')}x | One trade size: {s.get('position_margin_percent', 10)}% of TOTAL USDT equity\n"
             f"Max positions: {s.get('max_positions')} | Symbols limit: {s.get('symbols_limit')}\n"
             f"Scanner: {'AUTO' if s.get('auto_select_symbols') else 'MANUAL'} | ZeroFee: {'ON' if s.get('only_zero_fee') else 'OFF'} | scan age: {age:.1f}s | rescan: {s.get('zero_fee_rescan_sec')}s\n"
@@ -513,9 +523,15 @@ class MicroMakerEngine:
             )
         return "\n".join(lines)
 
+    def _format_reject_counts(self) -> str:
+        counts = self.stats.last_scan_reject_counts or {}
+        if not counts:
+            return "-"
+        return ", ".join(f"{k}={v}" for k, v in sorted(counts.items(), key=lambda kv: (-int(kv[1]), str(kv[0])))[:5])
+
     async def _run_loop(self) -> None:
         self._log_event("run_loop_started")
-        await self._notify("✅ LIVE loop v0016 started. WS depth scanner активен, авто-сканер zero-fee монет включён, TP/SL виртуальные внутри бота.")
+        await self._notify("✅ LIVE loop v0017 started. WS depth scanner активен, авто-сканер zero-fee монет включён, TP/SL виртуальные внутри бота.")
         while self.running:
             try:
                 s = self._settings()
@@ -607,15 +623,16 @@ class MicroMakerEngine:
                 # pre-sorts by 24h volume when public ticker data is available.
                 fresh = await client.verified_zero_fee_symbols(universe_limit)
                 ignored = self._ignored_symbols(s)
-                self.zero_fee_cache = [x for x in fresh if x and x not in ignored]
+                blocked = [x for x in fresh if self._blocked_symbol(x)]
+                self.zero_fee_cache = [x for x in fresh if x and x not in ignored and not self._blocked_symbol(x)]
                 self.zero_fee_ts = now
                 self.stats.zero_fee_universe_count = len(fresh)
                 self.stats.ignored_symbols_count = len(ignored)
                 self.stats.last_action = (
                     f"zero-fee universe rebuilt: all={len(fresh)}, "
-                    f"ignored={len(ignored)}, usable={len(self.zero_fee_cache)}"
+                    f"ignored={len(ignored)}, blocked={len(blocked)}, usable={len(self.zero_fee_cache)}"
                 )
-                self._log_event("zero_fee_rescan_done", all_count=len(fresh), ignored=len(ignored), usable=len(self.zero_fee_cache), first_symbols=self.zero_fee_cache[:30])
+                self._log_event("zero_fee_rescan_done", all_count=len(fresh), ignored=len(ignored), blocked=len(blocked), usable=len(self.zero_fee_cache), first_symbols=self.zero_fee_cache[:30])
             except Exception as e:
                 # Good cache behavior: never destroy a working universe just because
                 # one rescan failed. Keep the previous cache and wait until the next
@@ -633,7 +650,7 @@ class MicroMakerEngine:
             return []
 
         ignored = self._ignored_symbols(s)
-        pool = [x for x in self.zero_fee_cache if x not in ignored and (not allowed_set or x in allowed_set)]
+        pool = [x for x in self.zero_fee_cache if x not in ignored and not self._blocked_symbol(x) and (not allowed_set or x in allowed_set)]
         self.stats.ignored_symbols_count = len(ignored)
         self._log_debug("symbol_pool_active", zero_fee_cache=len(self.zero_fee_cache), pool_count=len(pool), ignored=len(ignored), allowed_filter=bool(allowed_set), first_symbols=pool[:30])
         # Active fast scan is intentionally capped; the full universe is rebuilt every
@@ -772,10 +789,11 @@ class MicroMakerEngine:
         scored.sort(key=lambda r: float(r.get("score") or 0), reverse=True)
         self.stats.last_scan_ts = now
         self.stats.last_scan_rows = scored
+        self.stats.last_scan_reject_counts = dict(reject_counts)
         if scored:
             self.stats.last_action = f"scan: best {scored[0]['symbol']} score={scored[0]['score']:.1f}"
         else:
-            self.stats.last_action = "scan: no symbol passed filters"
+            self.stats.last_action = f"scan: no symbol passed filters ({self._format_reject_counts()})"
         self._log_event("scan_summary", force=force, pool_count=len(pool), valid_count=len(scored), reject_counts=reject_counts, top=scored[:10], details_logged=len(scan_details), details=scan_details)
         return scored
 
