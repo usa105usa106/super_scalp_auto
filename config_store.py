@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 DEFAULTS: dict[str, Any] = {
-    "bot_version": "v0022",
+    "bot_version": "v0023",
 
     # secrets are set from Telegram with /api set KEY SECRET. Telegram token stays in ENV.
     "mexc_api_key": "",
@@ -39,10 +39,10 @@ DEFAULTS: dict[str, Any] = {
     # micro-maker behavior
     "target_ticks": 1,
     "stop_ticks": 1,
-    "order_lifetime_ms": 350,
+    "order_lifetime_ms": 550,
     "requote_interval_ms": 200,
     "cycle_sleep_ms": 100,
-    "max_position_lifetime_sec": 25,
+    "max_position_lifetime_sec": 18,
     "post_only_entry": True,
     "post_only_close": True,
     "emergency_market_close": True,
@@ -55,34 +55,34 @@ DEFAULTS: dict[str, Any] = {
     "allowed_symbols": "",
     "only_zero_fee": True,
     "allow_manual_fee_fallback": False,
-    "max_zero_fee_scan_symbols": 80,
+    "max_zero_fee_scan_symbols": 100,
     "scan_interval_sec": 1.0,
     "zero_fee_rescan_sec": 60.0,
     # 0 = do not cap universe; active WS/scoring window is max_zero_fee_scan_symbols/ws_depth_max_symbols.
     "zero_fee_universe_max_symbols": 0,
-    "switch_score_improvement_pct": 25.0,
-    "min_symbol_hold_sec": 60.0,
+    "switch_score_improvement_pct": 5.0,
+    "min_symbol_hold_sec": 5.0,
     "min_spread_ticks": 1,
-    "max_spread_ticks": 1,
+    "max_spread_ticks": 2,
     # absolute minimum depth on EACH side of the top book levels.
-    # v0017 lowers the old 5000 USDT default because micro accounts trade ~5-10 USDT notional.
-    "min_depth_usdt": 100.0,
+    # v0023 lowers v0022's 100 USDT because it blocked all trades on the current market.
+    "min_depth_usdt": 50.0,
     # dynamic minimum: position notional * this multiplier must fit on EACH side
-    "min_depth_multiplier": 5.0,
+    "min_depth_multiplier": 3.0,
     "min_24h_volume_usdt": 0.0,
-    "min_imbalance_ratio": 1.55,
+    "min_imbalance_ratio": 1.20,
     "score_top_levels": 5,
-    # v0022 plus profile: trade only clean, strong books. 0 disables.
-    "min_trade_score": 55.0,
-    "entry_recheck_ms": 300,
+    # v0023 active-plus profile: more trades than v0022, but still filters thin/flickering books.
+    "min_trade_score": 25.0,
+    "entry_recheck_ms": 120,
     "entry_recheck_required": True,
-    "entry_recheck_count": 2,
-    "cooldown_after_loss_sec": 180,
-    "cooldown_after_trade_sec": 12,
+    "entry_recheck_count": 1,
+    "cooldown_after_loss_sec": 20,
+    "cooldown_after_trade_sec": 1,
     "emergency_market_close_on_time_stop": False,
-    "max_position_hard_lifetime_sec": 75,
+    "max_position_hard_lifetime_sec": 45,
     "telegram_time_offset_hours": 3.0,
-    "trade_profile": "plus_v0022",
+    "trade_profile": "active_plus_v0023",
     # Persistently ignored symbols: regional restrictions, min/max margin/volume rejects, unsupported contracts.
     "ignored_symbols": {},
     "max_ignored_symbols": 1000,
@@ -90,7 +90,7 @@ DEFAULTS: dict[str, Any] = {
     # Fast market data. REST is used only as fallback/warmup; normal scanner/trade cycles use WS depth cache.
     "market_data_mode": "websocket",  # websocket | rest
     "ws_depth_enabled": True,
-    "ws_depth_max_symbols": 80,
+    "ws_depth_max_symbols": 100,
     "ws_book_stale_ms": 700,
     "ws_warmup_ms": 350,
     "rest_depth_fallback": True,
@@ -100,9 +100,9 @@ DEFAULTS: dict[str, Any] = {
     "ws_scan_rest_fallback_limit": 0,
 
     # risk guard
-    "daily_loss_limit_usdt": 0.35,
-    "max_consecutive_losses": 2,
-    "max_trades_per_hour": 12,
+    "daily_loss_limit_usdt": 0.8,
+    "max_consecutive_losses": 5,
+    "max_trades_per_hour": 120,
     "stop_on_api_errors": 8,
 
     # Persistent counters. They are updated after every closed trade and survive bot restarts.
@@ -134,42 +134,46 @@ DEFAULTS: dict[str, Any] = {
 }
 
 
-PLUS_PROFILE_V0022: dict[str, Any] = {
-    # High-win-rate / low-frequency profile. It cannot guarantee profit, but it
-    # avoids weak books that made v0017/v0018 take too many marginal trades.
+ACTIVE_PLUS_PROFILE_V0023: dict[str, Any] = {
+    # Active micro-maker mode: many more attempts than v0022.
+    # Goal: collect one-tick maker exits while avoiding the worst thin/noisy books.
+    # Profit is not guaranteed; this profile is tuned to trade, not to sit idle.
     "leverage": 5,
     "position_margin_percent": 10.0,
     "max_positions": 1,
     "symbols_limit": 1,
+    "max_zero_fee_scan_symbols": 100,
+    "ws_depth_max_symbols": 100,
     "target_ticks": 1,
     "stop_ticks": 1,
-    "order_lifetime_ms": 350,
+    "order_lifetime_ms": 550,
     "requote_interval_ms": 200,
-    "max_position_lifetime_sec": 25,
-    "min_depth_usdt": 100.0,
-    "min_depth_multiplier": 5.0,
+    "max_position_lifetime_sec": 18,
+    "min_depth_usdt": 50.0,
+    "min_depth_multiplier": 3.0,
     "min_spread_ticks": 1,
-    "max_spread_ticks": 1,
-    "min_imbalance_ratio": 1.55,
-    "min_trade_score": 55.0,
-    "entry_recheck_ms": 300,
+    "max_spread_ticks": 2,
+    "min_imbalance_ratio": 1.20,
+    "min_trade_score": 25.0,
+    "entry_recheck_ms": 120,
     "entry_recheck_required": True,
-    "entry_recheck_count": 2,
-    "cooldown_after_loss_sec": 180,
-    "cooldown_after_trade_sec": 12,
+    "entry_recheck_count": 1,
+    "cooldown_after_loss_sec": 20,
+    "cooldown_after_trade_sec": 1,
     "emergency_market_close_on_time_stop": False,
-    "max_position_hard_lifetime_sec": 75,
+    "max_position_hard_lifetime_sec": 45,
     "telegram_time_offset_hours": 3.0,
-    "max_trades_per_hour": 12,
-    "max_consecutive_losses": 2,
-    "daily_loss_limit_usdt": 0.35,
-    "switch_score_improvement_pct": 25.0,
-    "min_symbol_hold_sec": 60.0,
+    "max_trades_per_hour": 120,
+    "max_consecutive_losses": 5,
+    "daily_loss_limit_usdt": 0.8,
+    "switch_score_improvement_pct": 5.0,
+    "min_symbol_hold_sec": 5.0,
     "mexc_private_rate_limit": 8,
     "mexc_strict_leverage": False,
     "mexc_set_leverage_on_entry": False,
-    "trade_profile": "plus_v0022",
+    "trade_profile": "active_plus_v0023",
 }
+
 
 
 SENSITIVE = {"mexc_api_key", "mexc_api_secret"}
@@ -241,12 +245,12 @@ class ConfigStore:
                     out["mexc_private_rate_limit"] = DEFAULTS["mexc_private_rate_limit"]
         except Exception:
             pass
-        # v0022 migration: user requested a normal higher-quality plus mode.
+        # v0023 migration: user requested more trades after v0022 was too strict.
         # Apply only strategy/risk filters; never touch API keys, counters, panel ids, or ignored symbols.
         try:
             old_ver = str(data.get("bot_version") or "")
             if old_ver != DEFAULTS["bot_version"] and str(data.get("trade_profile") or "") != "custom":
-                out.update(PLUS_PROFILE_V0022)
+                out.update(ACTIVE_PLUS_PROFILE_V0023)
                 # Do not carry bad temporary ignores caused by low free margin / old bugs.
                 out["ignored_symbols"] = {}
         except Exception:

@@ -341,7 +341,7 @@ class MicroMakerEngine:
             self._log_error("start_balance_error", e)
         self.task = asyncio.create_task(self._run_loop(), name="micro_maker_loop")
         self._log_event("start_success", start_equity=self.stats.start_equity)
-        return "▶️ Micro Maker LIVE v0022 запущен. WS depth scanner активен, авто-поиск zero-fee монет включён."
+        return "▶️ Micro Maker LIVE v0023 запущен. WS depth scanner активен, авто-поиск zero-fee монет включён."
 
     async def stop(self, close_positions: bool = False) -> str:
         self._log_event("stop_requested", close_positions=close_positions, active_tasks=list(self.active_tasks.keys()))
@@ -435,7 +435,7 @@ class MicroMakerEngine:
         cooldown_left = max(0.0, self.cooldown_until_ts - time.time())
         cooldown_txt = f" | Cooldown: {cooldown_left:.0f}s" if cooldown_left > 0 else ""
         return (
-            f"🤖 MEXC Micro Maker LIVE {s.get('bot_version', 'v0022')}\n"
+            f"🤖 MEXC Micro Maker LIVE {s.get('bot_version', 'v0023')}\n"
             f"State: {state} | Updated: {last_update}{cooldown_txt}\n"
             f"Uptime: {h:02d}:{m:02d}:{sec:02d}\n\n"
             f"⚙️ {s.get('leverage')}x | Size: {s.get('position_margin_percent', 10)}% total | "
@@ -492,7 +492,7 @@ class MicroMakerEngine:
             "📊 Micro Maker Status\n\n"
             f"State: {'RUNNING' if self.is_running() else 'STOPPED'}\n"
             f"Active tasks: {len(self.active_tasks)} | Current: {', '.join(self.stats.current_symbols) or '-'}\n"
-            f"Version: {s.get('bot_version', 'v0022')}\n"
+            f"Version: {s.get('bot_version', 'v0023')}\n"
             f"Leverage: {s.get('leverage')}x | One trade size: {s.get('position_margin_percent', 10)}% of TOTAL USDT equity\n"
             f"Max positions: {s.get('max_positions')} | Symbols limit: {s.get('symbols_limit')}\n"
             f"Scanner: {'AUTO' if s.get('auto_select_symbols') else 'MANUAL'} | ZeroFee: {'ON' if s.get('only_zero_fee') else 'OFF'} | scan age: {age:.1f}s | rescan: {s.get('zero_fee_rescan_sec')}s\n"
@@ -548,7 +548,7 @@ class MicroMakerEngine:
 
     async def _run_loop(self) -> None:
         self._log_event("run_loop_started")
-        await self._notify("✅ LIVE loop v0022 started. WS depth scanner активен, авто-сканер zero-fee монет включён, TP/SL виртуальные внутри бота.")
+        await self._notify("✅ LIVE loop v0023 started. WS depth scanner активен, авто-сканер zero-fee монет включён, TP/SL виртуальные внутри бота.")
         while self.running:
             try:
                 s = self._settings()
@@ -919,7 +919,7 @@ class MicroMakerEngine:
             self.stats.last_action = f"{symbol}: no imbalance"
             self._log_debug("trade_cycle_no_imbalance", symbol=symbol, bid=bid, ask=ask)
             return
-        # v0022 profit mode: require the same one-tick spread and same imbalance
+        # v0023 active-plus mode: require a quick recheck of spread and imbalance
         # direction on several checks. This reduces trades, but avoids flickering books.
         recheck_ms = int(float(s.get("entry_recheck_ms") or 0))
         recheck_count = max(1, int(float(s.get("entry_recheck_count") or 1)))
@@ -966,7 +966,7 @@ class MicroMakerEngine:
                 f"min order too large for 10% rule: desired_margin={margin_usdt:.4f}, "
                 f"min_actual_margin={actual_margin:.4f}"
             )
-            # v0022: if margin was capped by available balance, this is not a bad symbol.
+            # v0023: if margin was capped by available balance, this is not a bad symbol.
             # It only means the account is busy: old/manual positions or live orders have
             # reserved margin. Do not add BTC/SOL/ONDO/etc. to persistent ignored list.
             if "capped by available balance" in margin_note:
@@ -996,7 +996,7 @@ class MicroMakerEngine:
                 self._log_debug("entry_order_cancel_after_lifetime", symbol=symbol, order_id=oid, result=cancel_res)
         except Exception as e:
             self._log_error("entry_order_cancel_error", e, symbol=symbol, order_id=oid)
-            # v0022 safety: if single-order cancel fails, immediately cancel all unfinished
+            # v0023 safety: if single-order cancel fails, immediately cancel all unfinished
             # orders for this contract so an unfilled maker order cannot keep margin frozen.
             try:
                 cleanup_res = await client.cancel_all_orders(symbol)
