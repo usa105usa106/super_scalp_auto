@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 DEFAULTS: dict[str, Any] = {
-    "bot_version": "v0027",
+    "bot_version": "v0028",
 
     # secrets are set from Telegram with /api set KEY SECRET. Telegram token stays in ENV.
     "mexc_api_key": "",
@@ -33,18 +33,18 @@ DEFAULTS: dict[str, Any] = {
     "position_size_mode": "balance_percent",  # balance_percent | fixed_usdt
     "position_margin_percent": 10.0,
     "margin_per_position_usdt": 2.0,
-    "max_positions": 1,
-    "symbols_limit": 1,
+    "max_positions": 3,
+    "symbols_limit": 3,
 
     # micro-maker behavior
     # v0025: base ticks are kept small, but real fee/zero-fee guard can lift
     # target_ticks dynamically when MEXC charges actual fees.
-    "target_ticks": 3,
-    "stop_ticks": 1,
-    "order_lifetime_ms": 450,
+    "target_ticks": 0,
+    "stop_ticks": 0,
+    "order_lifetime_ms": 550,
     "requote_interval_ms": 200,
     "cycle_sleep_ms": 100,
-    "max_position_lifetime_sec": 20,
+    "max_position_lifetime_sec": 0,
     "post_only_entry": True,
     "post_only_close": True,
     "emergency_market_close": True,
@@ -68,21 +68,21 @@ DEFAULTS: dict[str, Any] = {
     "max_spread_ticks": 2,
     # absolute minimum depth on EACH side of the top book levels.
     # v0025 keeps v0023's 100 USDT because it blocked all trades on the current market.
-    "min_depth_usdt": 50.0,
+    "min_depth_usdt": 35.0,
     # dynamic minimum: position notional * this multiplier must fit on EACH side
-    "min_depth_multiplier": 2.5,
+    "min_depth_multiplier": 2.0,
     "min_24h_volume_usdt": 0.0,
-    "min_imbalance_ratio": 1.20,
+    "min_imbalance_ratio": 1.03,
     "score_top_levels": 5,
     # v0025 real-profit profile: active scanner with real-balance PnL and fee-aware targets.
-    "min_trade_score": 25.0,
+    "min_trade_score": 0.0,
     "entry_recheck_ms": 120,
     "entry_recheck_required": True,
-    "entry_recheck_count": 2,
-    "cooldown_after_loss_sec": 45,
+    "entry_recheck_count": 1,
+    "cooldown_after_loss_sec": 0,
     "cooldown_after_trade_sec": 1,
     "emergency_market_close_on_time_stop": False,
-    "max_position_hard_lifetime_sec": 60,
+    "max_position_hard_lifetime_sec": 0,
     "telegram_time_offset_hours": 3.0,
     # v0025 real-profit accounting. If MEXC charges fees, one tick can show
     # green by price movement while real balance falls. These settings make
@@ -92,7 +92,7 @@ DEFAULTS: dict[str, Any] = {
     "fee_aware_target": True,
     "min_net_profit_usdt": 0.004,
     "max_fee_target_ticks": 10,
-    "ignore_symbol_after_real_loss": True,
+    "ignore_symbol_after_real_loss": False,
 
     # v0025: hard pre-trade fee gate. Dedicated zero-fee endpoint alone was not
     # enough on live SOL: the position reported real fees and balance fell.
@@ -102,14 +102,24 @@ DEFAULTS: dict[str, Any] = {
     "max_entry_maker_fee_rate": 0.0,
     "max_entry_taker_fee_rate": 0.0,
     "fee_guard_ignore_symbol": True,
-    "trade_profile": "edge_plus_v0027",
-    "edge_filter_enabled": True,
+    "trade_profile": "basket_harvest_v0028",
+    "edge_filter_enabled": False,
     "entry_top_imbalance_ratio": 1.15,
     "entry_microprice_min_ticks": 0.10,
     "entry_no_adverse_move_ticks": 0.0,
-    "ban_symbol_after_real_loss": True,
+    "ban_symbol_after_real_loss": False,
     "min_gross_profit_usdt": 0.004,
     "real_win_min_usdt": 0.0005,
+
+    # v0028 basket harvest: hold 3 live positions, no per-position stops,
+    # close only when real/proxy profit target is reached, then immediately refill.
+    "basket_harvest_enabled": True,
+    "basket_positions": 3,
+    "basket_target_profit_usdt": 0.01,
+    "basket_min_proxy_profit_usdt": 0.0105,
+    "basket_random_top_n": 25,
+    "basket_semi_random": True,
+    "basket_close_requote_ms": 200,
 
     # Persistently ignored symbols: regional restrictions, min/max margin/volume rejects, unsupported contracts.
     "ignored_symbols": {},
@@ -128,8 +138,8 @@ DEFAULTS: dict[str, Any] = {
     "ws_scan_rest_fallback_limit": 0,
 
     # risk guard
-    "daily_loss_limit_usdt": 0.25,
-    "max_consecutive_losses": 2,
+    "daily_loss_limit_usdt": 999.0,
+    "max_consecutive_losses": 999,
     "max_trades_per_hour": 120,
     "stop_on_api_errors": 8,
 
@@ -162,37 +172,37 @@ DEFAULTS: dict[str, Any] = {
 }
 
 
-EDGE_PLUS_PROFILE_V0027: dict[str, Any] = {
-    # Edge-plus live mode: real PnL only, fee-guard, asymmetric TP/SL,
-    # and book-quality filters before entry. Goal: fewer toxic fills and positive live expectancy.
+BASKET_HARVEST_PROFILE_V0028: dict[str, Any] = {
+    # Basket-harvest live mode: 3 small positions, no per-position stops,
+    # close only on +$0.01 real/proxy profit and immediately refill the basket.
     "leverage": 5,
     "position_margin_percent": 10.0,
-    "max_positions": 1,
-    "symbols_limit": 1,
+    "max_positions": 3,
+    "symbols_limit": 3,
     "max_zero_fee_scan_symbols": 100,
     "ws_depth_max_symbols": 100,
-    "target_ticks": 3,
-    "stop_ticks": 1,
-    "order_lifetime_ms": 450,
+    "target_ticks": 0,
+    "stop_ticks": 0,
+    "order_lifetime_ms": 550,
     "requote_interval_ms": 200,
-    "max_position_lifetime_sec": 20,
-    "min_depth_usdt": 50.0,
-    "min_depth_multiplier": 2.5,
+    "max_position_lifetime_sec": 0,
+    "min_depth_usdt": 35.0,
+    "min_depth_multiplier": 2.0,
     "min_spread_ticks": 1,
     "max_spread_ticks": 2,
-    "min_imbalance_ratio": 1.30,
-    "min_trade_score": 30.0,
+    "min_imbalance_ratio": 1.03,
+    "min_trade_score": 0.0,
     "entry_recheck_ms": 120,
     "entry_recheck_required": True,
-    "entry_recheck_count": 2,
-    "cooldown_after_loss_sec": 45,
+    "entry_recheck_count": 1,
+    "cooldown_after_loss_sec": 0,
     "cooldown_after_trade_sec": 1,
     "emergency_market_close_on_time_stop": False,
-    "max_position_hard_lifetime_sec": 60,
+    "max_position_hard_lifetime_sec": 0,
     "telegram_time_offset_hours": 3.0,
     "max_trades_per_hour": 120,
-    "max_consecutive_losses": 2,
-    "daily_loss_limit_usdt": 0.25,
+    "max_consecutive_losses": 999,
+    "daily_loss_limit_usdt": 999.0,
     "switch_score_improvement_pct": 5.0,
     "min_symbol_hold_sec": 5.0,
     "mexc_private_rate_limit": 8,
@@ -202,24 +212,32 @@ EDGE_PLUS_PROFILE_V0027: dict[str, Any] = {
     "fee_aware_target": True,
     "min_net_profit_usdt": 0.004,
     "max_fee_target_ticks": 10,
-    "ignore_symbol_after_real_loss": True,
+    "ignore_symbol_after_real_loss": False,
     "require_contract_zero_fee_on_entry": True,
     "max_entry_maker_fee_rate": 0.0,
     "max_entry_taker_fee_rate": 0.0,
     "fee_guard_ignore_symbol": True,
-    "trade_profile": "edge_plus_v0027",
-    "edge_filter_enabled": True,
+    "trade_profile": "basket_harvest_v0028",
+    "edge_filter_enabled": False,
     "entry_top_imbalance_ratio": 1.15,
     "entry_microprice_min_ticks": 0.10,
     "entry_no_adverse_move_ticks": 0.0,
-    "ban_symbol_after_real_loss": True,
+    "ban_symbol_after_real_loss": False,
     "min_gross_profit_usdt": 0.004,
     "real_win_min_usdt": 0.0005,
+    "basket_harvest_enabled": True,
+    "basket_positions": 3,
+    "basket_target_profit_usdt": 0.01,
+    "basket_min_proxy_profit_usdt": 0.0105,
+    "basket_random_top_n": 25,
+    "basket_semi_random": True,
+    "basket_close_requote_ms": 200,
 }
 
 # Backwards-compatible import name used by main.py.
-ZERO_FEE_GUARD_PROFILE_V0025 = EDGE_PLUS_PROFILE_V0027
-ACTIVE_PLUS_PROFILE_V0023 = EDGE_PLUS_PROFILE_V0027
+ZERO_FEE_GUARD_PROFILE_V0025 = BASKET_HARVEST_PROFILE_V0028
+ACTIVE_PLUS_PROFILE_V0023 = BASKET_HARVEST_PROFILE_V0028
+EDGE_PLUS_PROFILE_V0027 = BASKET_HARVEST_PROFILE_V0028
 
 
 

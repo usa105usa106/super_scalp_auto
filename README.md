@@ -1,16 +1,19 @@
-# MEXC Micro Maker Bot v0027
+# MEXC Micro Maker Bot v0028
 
-Edge Plus v0027: live-only real-PnL mode.
+Basket Harvest v0028.
 
-Key changes vs v0025:
-- Keeps v0025 real balance PnL accounting and exact fee guard.
-- TP/SL default is 3/1 ticks instead of 1/4.
-- Adds edge filter: top-of-book imbalance + microprice must agree with direction.
-- Requires stable recheck before entry.
-- Bans a symbol for the session after a real balance loss.
-- Keeps API message in chat, keeps 20-minute log retention, clears ignored cache on restart.
+Core idea:
+- keeps 3 active positions when possible;
+- each position uses 10% of total USDT equity as margin;
+- opens only API-confirmed / exact-contract zero-fee candidates;
+- no per-position stop loss;
+- closes a position only when the basket target is reached: default +0.01 USDT;
+- after a position closes, the bot immediately tries to refill the free slot;
+- real session PnL is counted from live USDT equity, not virtual price math.
 
 Use:
 /preset plus
 /ignore clear
 Start LIVE
+
+Important: there is no per-position stop in this mode. Manual Stop leaves positions open and cancels active orders. Close All still closes everything by market manually.

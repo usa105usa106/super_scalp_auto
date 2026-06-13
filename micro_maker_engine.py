@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import random
 import time
 from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass, field
@@ -426,7 +427,7 @@ class MicroMakerEngine:
             self._log_error("start_balance_error", e)
         self.task = asyncio.create_task(self._run_loop(), name="micro_maker_loop")
         self._log_event("start_success", start_equity=self.stats.start_equity)
-        return "▶️ Micro Maker LIVE v0025 запущен. WS depth scanner активен, авто-поиск zero-fee монет включён."
+        return "▶️ Micro Maker LIVE v0028 запущен. Basket Harvest: 3 позиции по 10%, стопов нет, закрытие только по +$0.01."
 
     async def stop(self, close_positions: bool = False) -> str:
         self._log_event("stop_requested", close_positions=close_positions, active_tasks=list(self.active_tasks.keys()))
@@ -520,13 +521,15 @@ class MicroMakerEngine:
         cooldown_left = max(0.0, self.cooldown_until_ts - time.time())
         cooldown_txt = f" | Cooldown: {cooldown_left:.0f}s" if cooldown_left > 0 else ""
         return (
-            f"🤖 MEXC Micro Maker LIVE {s.get('bot_version', 'v0025')}\n"
+            f"🤖 MEXC Micro Maker LIVE {s.get('bot_version', 'v0028')}\n"
             f"State: {state} | Updated: {last_update}{cooldown_txt}\n"
             f"Uptime: {h:02d}:{m:02d}:{sec:02d}\n\n"
             f"⚙️ {s.get('leverage')}x | Size: {s.get('position_margin_percent', 10)}% total | "
-            f"Pos: {s.get('max_positions')} | Symbols: {s.get('symbols_limit')}\n"
-            f"🎯 TP/SL: {s.get('target_ticks')}/{s.get('stop_ticks')} ticks | "
-            f"Emergency: {'ON' if s.get('emergency_market_close') else 'OFF'} | Profile: {s.get('trade_profile', '-')}\n"
+            f"Pos: {s.get('max_positions')} | Symbols: {s.get('symbols_limit')}\n" +
+            (f"🎯 Basket: {s.get('basket_positions', s.get('max_positions'))} pos × {s.get('position_margin_percent', 10)}% | Target: +${float(s.get('basket_target_profit_usdt') or 0.01):.3f} | Stop: OFF | "
+             if bool(s.get('basket_harvest_enabled')) else
+             f"🎯 TP/SL: {s.get('target_ticks')}/{s.get('stop_ticks')} ticks | ")
+            + f"Emergency: {'ON' if s.get('emergency_market_close') else 'OFF'} | Profile: {s.get('trade_profile', '-')}\n"
             f"🔎 Scanner: {'AUTO' if s.get('auto_select_symbols') else 'MANUAL'} | "
             f"ZeroFee: {'ON' if s.get('only_zero_fee') else 'OFF'} | age {age:.1f}s | rescan {s.get('zero_fee_rescan_sec')}s\n"
             f"🌐 Universe: {self.stats.zero_fee_universe_count or len(self.zero_fee_cache)} zero-fee | "
@@ -577,13 +580,15 @@ class MicroMakerEngine:
             "📊 Micro Maker Status\n\n"
             f"State: {'RUNNING' if self.is_running() else 'STOPPED'}\n"
             f"Active tasks: {len(self.active_tasks)} | Current: {', '.join(self.stats.current_symbols) or '-'}\n"
-            f"Version: {s.get('bot_version', 'v0025')}\n"
+            f"Version: {s.get('bot_version', 'v0028')}\n"
             f"Leverage: {s.get('leverage')}x | One trade size: {s.get('position_margin_percent', 10)}% of TOTAL USDT equity\n"
             f"Max positions: {s.get('max_positions')} | Symbols limit: {s.get('symbols_limit')}\n"
             f"Scanner: {'AUTO' if s.get('auto_select_symbols') else 'MANUAL'} | ZeroFee: {'ON' if s.get('only_zero_fee') else 'OFF'} | scan age: {age:.1f}s | rescan: {s.get('zero_fee_rescan_sec')}s\n"
             f"Zero-fee universe: {self.stats.zero_fee_universe_count or len(self.zero_fee_cache)} | active candidates: {s.get('max_zero_fee_scan_symbols')} | ignored: {self.stats.ignored_symbols_count or len(self._ignored_symbols(s))}\n"
-            f"Market data: {self._market_data_status()} | mode={s.get('market_data_mode')}\n"
-            f"Target/Stop: {s.get('target_ticks')}/{s.get('stop_ticks')} ticks | Emergency: {'ON' if s.get('emergency_market_close') else 'OFF'}\n"
+            f"Market data: {self._market_data_status()} | mode={s.get('market_data_mode')}\n" +
+            (f"Basket target: +${float(s.get('basket_target_profit_usdt') or 0.01):.3f} | Stop: OFF | Emergency: {'ON' if s.get('emergency_market_close') else 'OFF'}\n"
+             if bool(s.get('basket_harvest_enabled')) else
+             f"Target/Stop: {s.get('target_ticks')}/{s.get('stop_ticks')} ticks | Emergency: {'ON' if s.get('emergency_market_close') else 'OFF'}\n") +
             f"Session trades: {self.stats.trades} | + / -: {self.stats.wins}/{self.stats.losses} | Real/Approx PnL: {self.stats.estimated_pnl:.5f} USDT\n"
             f"Total trades: {total_trades} | + / -: {total_wins}/{total_losses} | Total Real/Real/Approx PnL: {total_pnl:.5f} USDT\n"
             f"Consecutive losses: {self.stats.consecutive_losses} | API errors: {self.stats.api_errors}\n"
@@ -633,7 +638,7 @@ class MicroMakerEngine:
 
     async def _run_loop(self) -> None:
         self._log_event("run_loop_started")
-        await self._notify("✅ LIVE loop v0025 started. WS depth scanner активен, авто-сканер zero-fee монет включён, TP/SL виртуальные внутри бота.")
+        await self._notify("✅ LIVE loop v0028 started. Basket Harvest активен: 3 позиции по 10%, стопов нет, закрытие только по +$0.01.")
         while self.running:
             try:
                 s = self._settings()
@@ -945,19 +950,35 @@ class MicroMakerEngine:
 
     async def _select_symbols(self, s: dict[str, Any]) -> list[str]:
         rows = await self._refresh_market_scan(s, force=False)
-        rows = self._apply_switch_guard(rows, s)
+        if not bool(s.get("basket_harvest_enabled", False)):
+            rows = self._apply_switch_guard(rows, s)
         if not rows:
             self._log_debug("select_symbols_empty")
             return []
+
         limit = max(1, int(s.get("symbols_limit") or 1))
-        picks = [r["symbol"] for r in rows[:limit]]
-        if picks != self.last_selected_symbols:
+        active = set(self.active_tasks.keys()) | set(self.stats.open_position_symbols)
+        candidates = [r for r in rows if r.get("symbol") not in active]
+        if not candidates:
+            self._log_debug("select_symbols_no_free_candidates", active=list(active), row_symbols=[r.get("symbol") for r in rows[:10]])
+            return []
+
+        if bool(s.get("basket_harvest_enabled", False)) and bool(s.get("basket_semi_random", True)):
+            top_n = max(limit, int(s.get("basket_random_top_n") or 25))
+            basket = candidates[:top_n]
+            random.shuffle(basket)
+            picks = [r["symbol"] for r in basket[:limit]]
+        else:
+            picks = [r["symbol"] for r in candidates[:limit]]
+
+        shown = list(active) + picks
+        if shown != self.last_selected_symbols:
             old_picks = self.last_selected_symbols[:]
             self.last_symbol_switch_ts = time.time()
-            self.last_selected_symbols = picks[:]
-            self._log_event("symbol_switch", old=old_picks, new=picks, top_rows=rows[:5])
-            await self._notify("🔁 Symbol switch: " + ", ".join(picks))
-        self.stats.current_symbols = picks[:]
+            self.last_selected_symbols = shown[:]
+            self._log_event("symbol_switch", old=old_picks, new=shown, picks=picks, active=list(active), top_rows=rows[:5])
+            await self._notify("🔁 Basket symbols: " + ", ".join(shown[:10]))
+        self.stats.current_symbols = shown[:]
         return picks
 
     async def _edge_metrics(self, symbol: str, s: dict[str, Any], book: dict[str, Any]) -> dict[str, Any]:
@@ -1000,6 +1021,24 @@ class MicroMakerEngine:
             forced = "short"
         else:
             forced = None
+
+        # v0028 Basket Harvest: semi-random basket entries. We still avoid totally
+        # dead books in the scanner, but direction is deliberately simple: follow
+        # the current book pressure; if the book is nearly balanced, randomize.
+        if bool(s.get("basket_harvest_enabled", False)):
+            if forced:
+                return forced
+            try:
+                m0 = await self._edge_metrics(symbol, s, book)
+                db = float(m0.get("depth_bid") or 0.0)
+                da = float(m0.get("depth_ask") or 0.0)
+                if db > da * 1.01:
+                    return "long"
+                if da > db * 1.01:
+                    return "short"
+            except Exception:
+                pass
+            return random.choice(["long", "short"])
 
         m = await self._edge_metrics(symbol, s, book)
         ratio = float(s.get("min_imbalance_ratio") or 1.04)
@@ -1214,7 +1253,144 @@ class MicroMakerEngine:
         await self._notify(f"✅ FILLED {symbol} {direction.upper()} contracts={pos.get('contracts')} entry={pos.get('entryPrice') or entry_price}")
         await self._manage_position(symbol, direction, pos, s, equity_before=equity_before)
 
+    async def _manage_basket_position(self, symbol: str, direction: str, pos: dict[str, Any], s: dict[str, Any], equity_before: float | None = None) -> None:
+        """v0028 Basket Harvest manager.
+
+        No per-position stop. A position is closed only with a maker close order
+        when the configured positive basket target is reachable. After the task
+        ends the run loop immediately refills the freed slot.
+        """
+        client = await self._ensure_client()
+        leverage = int(s.get("leverage") or 5)
+        open_type = int(s.get("open_type") or 1)
+        tick = await client.price_tick(symbol)
+        entry = float(pos.get("entryPrice") or 0) or (await client.ticker(symbol))["last"]
+        contracts = int(round(float(pos.get("contracts") or 0)))
+        amount = await client.amount_from_contracts(symbol, contracts)
+        tick_value = abs(float(tick or 0.0) * float(amount or 0.0))
+        target_usdt = max(0.0001, float(s.get("basket_target_profit_usdt") or 0.01))
+        min_proxy = max(target_usdt, float(s.get("basket_min_proxy_profit_usdt") or target_usdt))
+        target_ticks = max(1, int(math.ceil(target_usdt / max(tick_value, 1e-12))))
+        close_order_id: str | None = None
+        close_order_px: float | None = None
+        close_order_ts = 0.0
+        started = time.time()
+        exit_price_est = entry
+        reason = "basket_wait"
+        self._log_event(
+            "basket_manage_start",
+            symbol=symbol,
+            direction=direction,
+            entry=entry,
+            contracts=contracts,
+            amount=amount,
+            tick=tick,
+            tick_value=tick_value,
+            target_usdt=target_usdt,
+            min_proxy=min_proxy,
+            target_ticks=target_ticks,
+            equity_before=equity_before,
+            stop="OFF",
+        )
+        while self.running:
+            current = await client.find_position(symbol, direction)
+            if not current:
+                reason = "basket_target_closed"
+                self._log_event("basket_position_closed", symbol=symbol, direction=direction)
+                break
+            book = await self._depth(symbol, limit=5)
+            if not book["bids"] or not book["asks"]:
+                self._log_debug("basket_no_book", symbol=symbol, direction=direction)
+                await asyncio.sleep(0.2)
+                continue
+            bid, ask = book["bids"][0][0], book["asks"][0][0]
+            exit_price_est = bid if direction == "long" else ask
+            proxy_pnl = (exit_price_est - entry) * amount if direction == "long" else (entry - exit_price_est) * amount
+            target_price = entry + target_ticks * tick if direction == "long" else entry - target_ticks * tick
+
+            # Use maker-only close. If the market is already beyond target, quote
+            # at the best maker side to close quickly without crossing the spread.
+            if direction == "long":
+                close_px = max(ask, target_price) if proxy_pnl >= min_proxy else target_price
+            else:
+                close_px = min(bid, target_price) if proxy_pnl >= min_proxy else target_price
+
+            now = time.time()
+            requote_s = max(0.05, float(s.get("basket_close_requote_ms") or s.get("requote_interval_ms") or 200) / 1000.0)
+            px_changed = close_order_px is None or abs(float(close_px) - float(close_order_px)) >= max(tick * 0.5, 1e-12)
+            should_requote = (not close_order_id) or px_changed or (now - close_order_ts >= requote_s and proxy_pnl >= min_proxy)
+            if should_requote:
+                try:
+                    if close_order_id:
+                        cancel_res = await client.cancel_order(close_order_id, symbol)
+                        self._log_debug("basket_close_cancel", symbol=symbol, order_id=close_order_id, result=cancel_res)
+                        if self._cancel_response_has_order_closed(cancel_res):
+                            current_after_cancel = await client.find_position(symbol, direction)
+                            if not current_after_cancel:
+                                reason = "basket_target_closed"
+                                break
+                except Exception as e:
+                    self._log_error("basket_close_cancel_error", e, symbol=symbol, order_id=close_order_id)
+                current_before_close = await client.find_position(symbol, direction)
+                if not current_before_close:
+                    reason = "basket_target_closed"
+                    break
+                try:
+                    order = await client.close_limit(symbol, direction, contracts, close_px, leverage, open_type, post_only=True)
+                except Exception as e:
+                    if "2009" in str(e) or "nonexistent or closed" in str(e).lower():
+                        reason = "basket_target_closed"
+                        self._log_event("basket_close_position_already_closed", symbol=symbol, direction=direction, close_px=close_px, error=str(e)[:220])
+                        break
+                    self._log_error("basket_close_submit_error", e, symbol=symbol, direction=direction, close_px=close_px, proxy_pnl=proxy_pnl)
+                    await asyncio.sleep(0.25)
+                    continue
+                close_order_id = order.get("id")
+                close_order_px = close_px
+                close_order_ts = time.time()
+                self.stats.last_action = f"{symbol}: basket wait +${target_usdt:.3f}, proxy={proxy_pnl:.5f}, close_px={close_px}"
+                self._log_event("basket_close_submitted", symbol=symbol, direction=direction, contracts=contracts, close_px=close_px, target_price=target_price, target_ticks=target_ticks, target_usdt=target_usdt, proxy_pnl=proxy_pnl, order=order)
+            await asyncio.sleep(max(0.05, float(s.get("requote_interval_ms") or 200) / 1000.0))
+
+        await asyncio.sleep(0.25)
+        still = await client.find_position(symbol, direction)
+        if still:
+            # No stops means no forced market close from the position manager.
+            # Manual Close All remains available from Telegram.
+            self._log_event("basket_position_left_open", symbol=symbol, direction=direction, still=still, reason=reason)
+            if symbol in self.stats.open_position_symbols:
+                self.stats.open_position_symbols.remove(symbol)
+            return
+
+        equity_after = await self._read_usdt_total(client) if bool(s.get("real_pnl_enabled", True)) else None
+        real_pnl = None
+        if equity_before is not None and equity_after is not None:
+            real_pnl = float(equity_after) - float(equity_before)
+        virtual_pnl = (exit_price_est - entry) * amount if direction == "long" else (entry - exit_price_est) * amount
+        pnl = real_pnl if real_pnl is not None else virtual_pnl
+        pnl_source = "real_balance" if real_pnl is not None else "virtual_price"
+        self.stats.estimated_pnl += pnl
+        self.stats.trades += 1
+        win_min = max(0.0, float(s.get("real_win_min_usdt") or 0.0))
+        is_win = pnl > win_min
+        self._increment_total_trade_counters(pnl, is_win=is_win)
+        self.last_trade_closed_ts = time.time()
+        if is_win:
+            self.stats.wins += 1
+            self.stats.consecutive_losses = 0
+        else:
+            self.stats.losses += 1
+            self.stats.consecutive_losses += 1
+        self.stats.last_action = f"{symbol}: basket closed, pnl={pnl:.6f} ({pnl_source})"
+        self._log_event("basket_trade_closed", symbol=symbol, direction=direction, reason=reason, entry=entry, exit_price_est=exit_price_est, contracts=contracts, amount=amount, pnl=pnl, pnl_source=pnl_source, virtual_pnl=virtual_pnl, equity_before=equity_before, equity_after=equity_after, session_trades=self.stats.trades, session_wins=self.stats.wins, session_losses=self.stats.losses, target_usdt=target_usdt, target_ticks=target_ticks, elapsed=time.time()-started, is_win=is_win)
+        if symbol in self.stats.open_position_symbols:
+            self.stats.open_position_symbols.remove(symbol)
+        await self._notify(f"🏁 BASKET CLOSED {symbol} {direction.upper()} pnl={pnl:.6f} USDT ({pnl_source})")
+
     async def _manage_position(self, symbol: str, direction: str, pos: dict[str, Any], s: dict[str, Any], equity_before: float | None = None) -> None:
+        if bool(s.get("basket_harvest_enabled", False)):
+            await self._manage_basket_position(symbol, direction, pos, s, equity_before=equity_before)
+            return
         client = await self._ensure_client()
         leverage = int(s.get("leverage") or 5)
         open_type = int(s.get("open_type") or 1)
