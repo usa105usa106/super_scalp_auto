@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import math
 import time
+from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Any
 
@@ -54,6 +55,8 @@ class MicroMakerEngine:
         self.stats = EngineStats()
         self.depth_ws: MexcDepthWebSocket | None = None
         self._last_logged_scan_ts = 0.0
+        self.cooldown_until_ts = 0.0
+        self.last_trade_closed_ts = 0.0
         log_event("engine_init", version=self._settings().get("bot_version"))
 
     def _log_event(self, event: str, **data: Any) -> None:
@@ -328,6 +331,8 @@ class MicroMakerEngine:
         self.stats = EngineStats(started_ts=time.time())
         self.last_selected_symbols = []
         self.last_symbol_switch_ts = 0.0
+        self.cooldown_until_ts = 0.0
+        self.last_trade_closed_ts = 0.0
         try:
             bal = await self.client.fetch_balance() if self.client else {}
             self.stats.start_equity = float((bal.get("USDT") or {}).get("total") or 0)
@@ -336,7 +341,7 @@ class MicroMakerEngine:
             self._log_error("start_balance_error", e)
         self.task = asyncio.create_task(self._run_loop(), name="micro_maker_loop")
         self._log_event("start_success", start_equity=self.stats.start_equity)
-        return "▶️ Micro Maker LIVE v0021 запущен. WS depth scanner активен, авто-поиск zero-fee монет включён."
+        return "▶️ Micro Maker LIVE v0022 запущен. WS depth scanner активен, авто-поиск zero-fee монет включён."
 
     async def stop(self, close_positions: bool = False) -> str:
         self._log_event("stop_requested", close_positions=close_positions, active_tasks=list(self.active_tasks.keys()))
@@ -399,6 +404,14 @@ class MicroMakerEngine:
             self._log_error("close_all_error", e)
             return f"❌ Close All error: {self.stats.last_error}"
 
+    def _local_time_text(self, s: dict[str, Any] | None = None) -> str:
+        try:
+            settings = s or self._settings()
+            off = float(settings.get("telegram_time_offset_hours", 3.0) or 0)
+            return datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=off))).strftime("%H:%M:%S")
+        except Exception:
+            return time.strftime("%H:%M:%S")
+
     def quick_status_text(self) -> str:
         """Fast status for the Telegram live panel. No REST balance/positions calls here."""
         s = self._settings()
@@ -414,14 +427,16 @@ class MicroMakerEngine:
         current = ", ".join(self.stats.current_symbols) or "-"
         opened = ", ".join(self.stats.open_position_symbols) or "-"
         state = "RUNNING" if self.is_running() else "STOPPED"
-        last_update = time.strftime("%H:%M:%S")
+        last_update = self._local_time_text(s)
         total_trades = int(s.get("total_trades_count") or 0)
         total_wins = int(s.get("total_wins_count") or 0)
         total_losses = int(s.get("total_losses_count") or 0)
         total_pnl = float(s.get("total_estimated_pnl_usdt") or 0.0)
+        cooldown_left = max(0.0, self.cooldown_until_ts - time.time())
+        cooldown_txt = f" | Cooldown: {cooldown_left:.0f}s" if cooldown_left > 0 else ""
         return (
-            f"🤖 MEXC Micro Maker LIVE {s.get('bot_version', 'v0021')}\n"
-            f"State: {state} | Updated: {last_update}\n"
+            f"🤖 MEXC Micro Maker LIVE {s.get('bot_version', 'v0022')}\n"
+            f"State: {state} | Updated: {last_update}{cooldown_txt}\n"
             f"Uptime: {h:02d}:{m:02d}:{sec:02d}\n\n"
             f"⚙️ {s.get('leverage')}x | Size: {s.get('position_margin_percent', 10)}% total | "
             f"Pos: {s.get('max_positions')} | Symbols: {s.get('symbols_limit')}\n"
@@ -471,11 +486,13 @@ class MicroMakerEngine:
         total_wins = int(s.get("total_wins_count") or 0)
         total_losses = int(s.get("total_losses_count") or 0)
         total_pnl = float(s.get("total_estimated_pnl_usdt") or 0.0)
+        cooldown_left = max(0.0, self.cooldown_until_ts - time.time())
+        cooldown_txt = f" | Cooldown: {cooldown_left:.0f}s" if cooldown_left > 0 else ""
         return (
             "📊 Micro Maker Status\n\n"
             f"State: {'RUNNING' if self.is_running() else 'STOPPED'}\n"
             f"Active tasks: {len(self.active_tasks)} | Current: {', '.join(self.stats.current_symbols) or '-'}\n"
-            f"Version: {s.get('bot_version', 'v0021')}\n"
+            f"Version: {s.get('bot_version', 'v0022')}\n"
             f"Leverage: {s.get('leverage')}x | One trade size: {s.get('position_margin_percent', 10)}% of TOTAL USDT equity\n"
             f"Max positions: {s.get('max_positions')} | Symbols limit: {s.get('symbols_limit')}\n"
             f"Scanner: {'AUTO' if s.get('auto_select_symbols') else 'MANUAL'} | ZeroFee: {'ON' if s.get('only_zero_fee') else 'OFF'} | scan age: {age:.1f}s | rescan: {s.get('zero_fee_rescan_sec')}s\n"
@@ -531,7 +548,7 @@ class MicroMakerEngine:
 
     async def _run_loop(self) -> None:
         self._log_event("run_loop_started")
-        await self._notify("✅ LIVE loop v0021 started. WS depth scanner активен, авто-сканер zero-fee монет включён, TP/SL виртуальные внутри бота.")
+        await self._notify("✅ LIVE loop v0022 started. WS depth scanner активен, авто-сканер zero-fee монет включён, TP/SL виртуальные внутри бота.")
         while self.running:
             try:
                 s = self._settings()
@@ -869,6 +886,18 @@ class MicroMakerEngine:
             return
         client = await self._ensure_client()
         s = self._settings()
+        now = time.time()
+        if now < self.cooldown_until_ts:
+            left = self.cooldown_until_ts - now
+            self.stats.last_action = f"cooldown after loss/trade: {left:.0f}s"
+            self._log_debug("trade_cycle_skip_cooldown", symbol=symbol, left_sec=left)
+            return
+        after_trade = max(0.0, float(s.get("cooldown_after_trade_sec") or 0))
+        if after_trade > 0 and self.last_trade_closed_ts > 0 and now - self.last_trade_closed_ts < after_trade:
+            left = after_trade - (now - self.last_trade_closed_ts)
+            self.stats.last_action = f"cooldown after trade: {left:.0f}s"
+            self._log_debug("trade_cycle_skip_after_trade_cooldown", symbol=symbol, left_sec=left)
+            return
         if len(self.stats.trade_timestamps) >= int(s.get("max_trades_per_hour") or 120):
             self.stats.last_action = "hourly trade limit reached"
             self._log_event("trade_cycle_skip_hourly_limit", symbol=symbol, trade_timestamps=len(self.stats.trade_timestamps))
@@ -890,28 +919,30 @@ class MicroMakerEngine:
             self.stats.last_action = f"{symbol}: no imbalance"
             self._log_debug("trade_cycle_no_imbalance", symbol=symbol, bid=bid, ask=ask)
             return
-        # v0021 plus mode: recheck the book after a short delay.
-        # This filters out flickering imbalance so the bot opens fewer but cleaner trades.
+        # v0022 profit mode: require the same one-tick spread and same imbalance
+        # direction on several checks. This reduces trades, but avoids flickering books.
         recheck_ms = int(float(s.get("entry_recheck_ms") or 0))
+        recheck_count = max(1, int(float(s.get("entry_recheck_count") or 1)))
         if bool(s.get("entry_recheck_required", False)) and recheck_ms > 0:
-            await asyncio.sleep(max(0.0, recheck_ms / 1000.0))
-            book2 = await self._depth(symbol, limit=10)
-            if not book2["bids"] or not book2["asks"]:
-                self.stats.last_action = f"{symbol}: recheck no book"
-                self._log_debug("trade_cycle_recheck_no_book", symbol=symbol, source=book2.get("source"))
-                return
-            bid2, ask2 = book2["bids"][0][0], book2["asks"][0][0]
-            spread_ticks2 = (ask2 - bid2) / max(tick, 1e-12)
-            if spread_ticks2 + 1e-9 < min_spread or spread_ticks2 > max_spread + 1e-9:
-                self.stats.last_action = f"{symbol}: recheck spread reject"
-                self._log_debug("trade_cycle_recheck_spread_reject", symbol=symbol, bid=bid2, ask=ask2, spread_ticks=spread_ticks2, min_spread=min_spread, max_spread=max_spread)
-                return
-            direction2 = await self._choose_direction(symbol, s, book2)
-            if direction2 != direction:
-                self.stats.last_action = f"{symbol}: recheck direction changed {direction}->{direction2}"
-                self._log_debug("trade_cycle_recheck_direction_changed", symbol=symbol, old_direction=direction, new_direction=direction2, bid=bid2, ask=ask2)
-                return
-            bid, ask, book, spread_ticks = bid2, ask2, book2, spread_ticks2
+            for idx in range(recheck_count):
+                await asyncio.sleep(max(0.0, recheck_ms / 1000.0))
+                book2 = await self._depth(symbol, limit=10)
+                if not book2["bids"] or not book2["asks"]:
+                    self.stats.last_action = f"{symbol}: recheck no book"
+                    self._log_debug("trade_cycle_recheck_no_book", symbol=symbol, check=idx + 1, source=book2.get("source"))
+                    return
+                bid2, ask2 = book2["bids"][0][0], book2["asks"][0][0]
+                spread_ticks2 = (ask2 - bid2) / max(tick, 1e-12)
+                if spread_ticks2 + 1e-9 < min_spread or spread_ticks2 > max_spread + 1e-9:
+                    self.stats.last_action = f"{symbol}: recheck spread reject"
+                    self._log_debug("trade_cycle_recheck_spread_reject", symbol=symbol, check=idx + 1, bid=bid2, ask=ask2, spread_ticks=spread_ticks2, min_spread=min_spread, max_spread=max_spread)
+                    return
+                direction2 = await self._choose_direction(symbol, s, book2)
+                if direction2 != direction:
+                    self.stats.last_action = f"{symbol}: recheck direction changed {direction}->{direction2}"
+                    self._log_debug("trade_cycle_recheck_direction_changed", symbol=symbol, check=idx + 1, old_direction=direction, new_direction=direction2, bid=bid2, ask=ask2)
+                    return
+                bid, ask, book, spread_ticks = bid2, ask2, book2, spread_ticks2
 
         entry_price = bid if direction == "long" else ask
         leverage = int(s.get("leverage") or 5)
@@ -935,7 +966,7 @@ class MicroMakerEngine:
                 f"min order too large for 10% rule: desired_margin={margin_usdt:.4f}, "
                 f"min_actual_margin={actual_margin:.4f}"
             )
-            # v0021: if margin was capped by available balance, this is not a bad symbol.
+            # v0022: if margin was capped by available balance, this is not a bad symbol.
             # It only means the account is busy: old/manual positions or live orders have
             # reserved margin. Do not add BTC/SOL/ONDO/etc. to persistent ignored list.
             if "capped by available balance" in margin_note:
@@ -965,7 +996,7 @@ class MicroMakerEngine:
                 self._log_debug("entry_order_cancel_after_lifetime", symbol=symbol, order_id=oid, result=cancel_res)
         except Exception as e:
             self._log_error("entry_order_cancel_error", e, symbol=symbol, order_id=oid)
-            # v0021 safety: if single-order cancel fails, immediately cancel all unfinished
+            # v0022 safety: if single-order cancel fails, immediately cancel all unfinished
             # orders for this contract so an unfilled maker order cannot keep margin frozen.
             try:
                 cleanup_res = await client.cancel_all_orders(symbol)
@@ -1014,21 +1045,29 @@ class MicroMakerEngine:
             bid, ask = book["bids"][0][0], book["asks"][0][0]
             exit_price_est = bid if direction == "long" else ask
             stop_hit = (direction == "long" and bid <= entry - stop_ticks * tick) or (direction == "short" and ask >= entry + stop_ticks * tick)
-            time_hit = time.time() - started >= max_life
-            if stop_hit or time_hit:
-                reason = "virtual_stop" if stop_hit else "time_stop"
-                self._log_event("position_exit_trigger", symbol=symbol, direction=direction, reason=reason, entry=entry, bid=bid, ask=ask, exit_est=exit_price_est)
+            elapsed = time.time() - started
+            time_hit = elapsed >= max_life
+            hard_life = max(max_life + 5.0, float(s.get("max_position_hard_lifetime_sec") or (max_life * 3)))
+            hard_time_hit = elapsed >= hard_life
+            if stop_hit or hard_time_hit:
+                reason = "virtual_stop" if stop_hit else "hard_time_stop"
+                self._log_event("position_exit_trigger", symbol=symbol, direction=direction, reason=reason, entry=entry, bid=bid, ask=ask, exit_est=exit_price_est, elapsed=elapsed)
                 try:
                     if close_order_id:
                         cancel_res = await client.cancel_order(close_order_id, symbol)
                         self._log_debug("close_order_cancel_before_emergency", symbol=symbol, order_id=close_order_id, result=cancel_res)
                 except Exception as e:
                     self._log_error("close_order_cancel_before_emergency_error", e, symbol=symbol, order_id=close_order_id)
-                if bool(s.get("emergency_market_close")):
+                allow_time_market = bool(s.get("emergency_market_close_on_time_stop", False))
+                if bool(s.get("emergency_market_close")) and (stop_hit or hard_time_hit or allow_time_market):
                     market_res = await client.close_market(current, leverage, open_type)
                     self._log_event("emergency_market_close_sent", symbol=symbol, result=market_res)
                 break
             target = entry + target_ticks * tick if direction == "long" else entry - target_ticks * tick
+            maker_time_exit = bool(time_hit and not s.get("emergency_market_close_on_time_stop", False))
+            if maker_time_exit and reason != "time_maker_exit":
+                reason = "time_maker_exit"
+                self._log_event("position_time_maker_exit_mode", symbol=symbol, direction=direction, entry=entry, bid=bid, ask=ask, elapsed=elapsed)
             if not close_order_id or time.time() - close_order_ts >= max(0.1, float(s.get("order_lifetime_ms") or 700) / 1000.0):
                 try:
                     if close_order_id:
@@ -1036,7 +1075,11 @@ class MicroMakerEngine:
                         self._log_debug("close_order_requote_cancel", symbol=symbol, order_id=close_order_id, result=cancel_res)
                 except Exception as e:
                     self._log_error("close_order_requote_cancel_error", e, symbol=symbol, order_id=close_order_id)
-                close_px = max(ask, target) if direction == "long" else min(bid, target)
+                if maker_time_exit:
+                    # After soft lifetime, stop insisting on TP and work a maker exit at the best opposite quote.
+                    close_px = ask if direction == "long" else bid
+                else:
+                    close_px = max(ask, target) if direction == "long" else min(bid, target)
                 order = await client.close_limit(symbol, direction, contracts, close_px, leverage, open_type, post_only=bool(s.get("post_only_close")))
                 self._log_event("close_order_submitted", symbol=symbol, direction=direction, contracts=contracts, close_px=close_px, target=target, order=order)
                 close_order_id = order.get("id")
@@ -1046,22 +1089,31 @@ class MicroMakerEngine:
         await asyncio.sleep(0.25)
         still = await client.find_position(symbol, direction)
         if still:
-            try:
-                market_res = await client.close_market(still, leverage, open_type)
-                self._log_event("final_market_close_sent", symbol=symbol, still=still, result=market_res)
-            except Exception as e:
-                self._log_error("final_market_close_error", e, symbol=symbol, still=still)
+            final_market_allowed = bool(s.get("emergency_market_close")) and (reason in {"virtual_stop", "hard_time_stop"} or bool(s.get("emergency_market_close_on_time_stop", False)) or not self.running)
+            if final_market_allowed:
+                try:
+                    market_res = await client.close_market(still, leverage, open_type)
+                    self._log_event("final_market_close_sent", symbol=symbol, still=still, result=market_res, reason=reason)
+                except Exception as e:
+                    self._log_error("final_market_close_error", e, symbol=symbol, still=still)
+            else:
+                self._log_event("final_market_close_skipped", symbol=symbol, still=still, reason=reason)
         amount = await client.amount_from_contracts(symbol, contracts)
         pnl = (exit_price_est - entry) * amount if direction == "long" else (entry - exit_price_est) * amount
         self.stats.estimated_pnl += pnl
         self.stats.trades += 1
         self._increment_total_trade_counters(pnl)
+        self.last_trade_closed_ts = time.time()
         if pnl >= 0:
             self.stats.wins += 1
             self.stats.consecutive_losses = 0
         else:
             self.stats.losses += 1
             self.stats.consecutive_losses += 1
+            pause = max(0.0, float(s.get("cooldown_after_loss_sec") or 0))
+            if pause > 0:
+                self.cooldown_until_ts = max(self.cooldown_until_ts, time.time() + pause)
+                self._log_event("loss_cooldown_started", symbol=symbol, pause_sec=pause, cooldown_until=self.cooldown_until_ts)
         self.stats.last_action = f"{symbol}: closed {reason}, est pnl={pnl:.6f}"
         self._log_event("trade_closed", symbol=symbol, direction=direction, reason=reason, entry=entry, exit_price_est=exit_price_est, contracts=contracts, amount=amount, pnl=pnl, session_trades=self.stats.trades, session_wins=self.stats.wins, session_losses=self.stats.losses)
         if symbol in self.stats.open_position_symbols:
