@@ -206,9 +206,15 @@ class MicroMakerEngine:
             # With actual zero-fee this stays 0 and the target remains one tick.
             estimated_round_fee = entry_fee * 2.0
             min_net = max(0.0, float(s.get("min_net_profit_usdt") or 0.0))
+            min_gross = max(0.0, float(s.get("min_gross_profit_usdt") or 0.0))
             needed_ticks = base_target_ticks
-            if tick_value > 0 and estimated_round_fee > 0:
-                needed_ticks = int(math.ceil((estimated_round_fee + min_net) / tick_value))
+            if tick_value > 0:
+                # Require enough ticks to make the trade meaningful even when fees are zero.
+                # On SOL one tick can be only about 0.001 USDT; that is too small and gets
+                # eaten by balance noise / close execution. v0027 raises TP to a real amount.
+                gross_ticks = int(math.ceil(min_gross / tick_value)) if min_gross > 0 else base_target_ticks
+                fee_ticks = int(math.ceil((estimated_round_fee + min_net) / tick_value)) if estimated_round_fee > 0 else base_target_ticks
+                needed_ticks = max(base_target_ticks, gross_ticks, fee_ticks)
             max_ticks = max(base_target_ticks, int(s.get("max_fee_target_ticks") or 18))
             target_ticks = max(base_target_ticks, min(max_ticks, needed_ticks))
             info.update({
@@ -217,6 +223,7 @@ class MicroMakerEngine:
                 "entry_fee": entry_fee,
                 "estimated_round_fee": estimated_round_fee,
                 "min_net_profit_usdt": min_net,
+                "min_gross_profit_usdt": min_gross,
                 "needed_ticks": needed_ticks,
                 "max_fee_target_ticks": max_ticks,
                 "target_ticks": target_ticks,
@@ -243,14 +250,16 @@ class MicroMakerEngine:
             pass
         return False
 
-    def _increment_total_trade_counters(self, pnl: float) -> None:
+    def _increment_total_trade_counters(self, pnl: float, is_win: bool | None = None) -> None:
         """Persist total closed-trade counters across restarts."""
         try:
             s = self.store.load()
             total = int(s.get("total_trades_count") or 0) + 1
             wins = int(s.get("total_wins_count") or 0)
             losses = int(s.get("total_losses_count") or 0)
-            if pnl >= 0:
+            if is_win is None:
+                is_win = pnl > 0
+            if is_win:
                 wins += 1
             else:
                 losses += 1
@@ -836,7 +845,14 @@ class MicroMakerEngine:
                 if imbalance < min_imbalance:
                     add_scan_detail(sym, "reject", "imbalance", bid=bid, ask=ask, spread_ticks=spread_ticks, depth_bid=depth_b, depth_ask=depth_a, depth_min=depth_min, imbalance=imbalance, min_imbalance=min_imbalance, source=book.get("source"))
                     continue
-                bias = "long" if depth_b >= depth_a else "short"
+                bias = await self._choose_direction(sym, s, book)
+                if not bias:
+                    try:
+                        em = await self._edge_metrics(sym, s, book)
+                    except Exception:
+                        em = {}
+                    add_scan_detail(sym, "reject", "edge", bid=bid, ask=ask, spread_ticks=spread_ticks, depth_bid=depth_b, depth_ask=depth_a, depth_min=depth_min, imbalance=imbalance, source=book.get("source"), **em)
+                    continue
                 quote_volume = 0.0
                 if min_volume > 0:
                     try:
@@ -852,7 +868,13 @@ class MicroMakerEngine:
                 spread_score = max(0.0, 12.0 - spread_ticks * 2.5)
                 imbalance_score = min((imbalance - 1.0) * 40.0, 25.0)
                 volume_score = min(math.log10(max(quote_volume, 1.0)) * 1.5, 12.0) if quote_volume > 0 else 0.0
-                score = depth_score + spread_score + imbalance_score + volume_score
+                try:
+                    em = await self._edge_metrics(sym, s, book)
+                    top_score = min((float(em.get("top_imbalance") or 1.0) - 1.0) * 12.0, 8.0)
+                    micro_score = min(abs(float(em.get("micro_ticks") or 0.0)) * 8.0, 6.0)
+                except Exception:
+                    em, top_score, micro_score = {}, 0.0, 0.0
+                score = depth_score + spread_score + imbalance_score + volume_score + top_score + micro_score
                 scored.append({
                     "symbol": sym,
                     "score": score,
@@ -867,6 +889,8 @@ class MicroMakerEngine:
                     "bid": bid,
                     "ask": ask,
                     "tick": tick,
+                    "top_imbalance": em.get("top_imbalance"),
+                    "micro_ticks": em.get("micro_ticks"),
                     "source": book.get("source", "rest"),
                 })
                 add_scan_detail(sym, "valid", score=score, bias=bias, bid=bid, ask=ask, spread_ticks=spread_ticks, depth_min=depth_min, required_depth=required_depth, imbalance=imbalance, quote_volume=quote_volume, source=book.get("source", "rest"))
@@ -936,22 +960,77 @@ class MicroMakerEngine:
         self.stats.current_symbols = picks[:]
         return picks
 
+    async def _edge_metrics(self, symbol: str, s: dict[str, Any], book: dict[str, Any]) -> dict[str, Any]:
+        """Cheap live edge metrics from the current book.
+
+        v0027 deliberately avoids clever paper-only signals. It uses only values that
+        exist at order time: top-level depth, 5-level depth, spread and microprice.
+        The goal is to avoid toxic maker fills where our order is filled because the
+        book is already moving against us.
+        """
+        client = await self._ensure_client()
+        levels = max(1, min(20, int(s.get("score_top_levels") or 5)))
+        tick = await client.price_tick(symbol)
+        contract_size = await client.contract_size(symbol)
+        bid = float(book["bids"][0][0])
+        ask = float(book["asks"][0][0])
+        bid_top = float(book["bids"][0][0]) * float(book["bids"][0][1]) * contract_size
+        ask_top = float(book["asks"][0][0]) * float(book["asks"][0][1]) * contract_size
+        depth_b = sum(float(p) * float(q) * contract_size for p, q in book["bids"][:levels])
+        depth_a = sum(float(p) * float(q) * contract_size for p, q in book["asks"][:levels])
+        mid = (bid + ask) / 2.0
+        # Microprice closer to ask = buy pressure; closer to bid = sell pressure.
+        microprice = (bid * ask_top + ask * bid_top) / max(bid_top + ask_top, 1e-12)
+        micro_ticks = (microprice - mid) / max(tick, 1e-12)
+        return {
+            "bid": bid, "ask": ask, "tick": tick,
+            "bid_top": bid_top, "ask_top": ask_top,
+            "depth_bid": depth_b, "depth_ask": depth_a,
+            "depth_min": min(depth_b, depth_a),
+            "top_imbalance": max(bid_top / max(ask_top, 1e-9), ask_top / max(bid_top, 1e-9)),
+            "depth_imbalance": max(depth_b / max(depth_a, 1e-9), depth_a / max(depth_b, 1e-9)),
+            "microprice": microprice, "micro_ticks": micro_ticks,
+        }
+
     async def _choose_direction(self, symbol: str, s: dict[str, Any], book: dict[str, Any]) -> str | None:
         mode = str(s.get("direction_mode") or "both").lower()
         if mode in {"long", "buy"}:
-            return "long"
-        if mode in {"short", "sell"}:
-            return "short"
-        client = await self._ensure_client()
-        levels = max(1, min(20, int(s.get("score_top_levels") or 5)))
-        contract_size = await client.contract_size(symbol)
-        depth_b = sum(p * q * contract_size for p, q in book["bids"][:levels])
-        depth_a = sum(p * q * contract_size for p, q in book["asks"][:levels])
+            forced = "long"
+        elif mode in {"short", "sell"}:
+            forced = "short"
+        else:
+            forced = None
+
+        m = await self._edge_metrics(symbol, s, book)
         ratio = float(s.get("min_imbalance_ratio") or 1.04)
-        if depth_b >= depth_a * ratio:
+        top_ratio = float(s.get("entry_top_imbalance_ratio") or 1.0)
+        micro_min = float(s.get("entry_microprice_min_ticks") or 0.0)
+
+        long_ok = (
+            m["depth_bid"] >= m["depth_ask"] * ratio
+            and m["bid_top"] >= m["ask_top"] * top_ratio
+            and m["micro_ticks"] >= micro_min
+        )
+        short_ok = (
+            m["depth_ask"] >= m["depth_bid"] * ratio
+            and m["ask_top"] >= m["bid_top"] * top_ratio
+            and m["micro_ticks"] <= -micro_min
+        )
+        if forced == "long":
+            return "long" if long_ok or not bool(s.get("edge_filter_enabled", True)) else None
+        if forced == "short":
+            return "short" if short_ok or not bool(s.get("edge_filter_enabled", True)) else None
+        if not bool(s.get("edge_filter_enabled", True)):
+            if m["depth_bid"] >= m["depth_ask"] * ratio:
+                return "long"
+            if m["depth_ask"] >= m["depth_bid"] * ratio:
+                return "short"
+            return None
+        if long_ok:
             return "long"
-        if depth_a >= depth_b * ratio:
+        if short_ok:
             return "short"
+        self._log_debug("edge_direction_reject", symbol=symbol, **m, min_depth_ratio=ratio, min_top_ratio=top_ratio, min_micro_ticks=micro_min)
         return None
 
     async def _pretrade_fee_guard(self, symbol: str, s: dict[str, Any], client: MexcFuturesClient) -> bool:
@@ -1250,9 +1329,11 @@ class MicroMakerEngine:
         pnl_source = "real_balance" if real_pnl is not None else "virtual_price"
         self.stats.estimated_pnl += pnl
         self.stats.trades += 1
-        self._increment_total_trade_counters(pnl)
+        win_min = max(0.0, float(s.get("real_win_min_usdt") or 0.0))
+        is_win = pnl > win_min
+        self._increment_total_trade_counters(pnl, is_win=is_win)
         self.last_trade_closed_ts = time.time()
-        if pnl >= 0:
+        if is_win:
             self.stats.wins += 1
             self.stats.consecutive_losses = 0
         else:
@@ -1265,7 +1346,7 @@ class MicroMakerEngine:
             if bool(s.get("ignore_symbol_after_real_loss", True)) and pnl_source == "real_balance":
                 self._ignore_symbol(symbol, f"real pnl negative: {pnl:.6f} USDT; virtual={virtual_pnl:.6f}")
         self.stats.last_action = f"{symbol}: closed {reason}, pnl={pnl:.6f} ({pnl_source})"
-        self._log_event("trade_closed", symbol=symbol, direction=direction, reason=reason, entry=entry, exit_price_est=exit_price_est, contracts=contracts, amount=amount, pnl=pnl, pnl_source=pnl_source, virtual_pnl=virtual_pnl, equity_before=equity_before, equity_after=equity_after, session_trades=self.stats.trades, session_wins=self.stats.wins, session_losses=self.stats.losses)
+        self._log_event("trade_closed", symbol=symbol, direction=direction, reason=reason, entry=entry, exit_price_est=exit_price_est, contracts=contracts, amount=amount, pnl=pnl, pnl_source=pnl_source, virtual_pnl=virtual_pnl, equity_before=equity_before, equity_after=equity_after, session_trades=self.stats.trades, session_wins=self.stats.wins, session_losses=self.stats.losses, win_min=win_min, is_win=is_win)
         if symbol in self.stats.open_position_symbols:
             self.stats.open_position_symbols.remove(symbol)
         await self._notify(f"🏁 CLOSED {symbol} {direction.upper()} reason={reason} pnl={pnl:.6f} USDT ({pnl_source})")

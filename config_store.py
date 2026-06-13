@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 DEFAULTS: dict[str, Any] = {
-    "bot_version": "v0025",
+    "bot_version": "v0027",
 
     # secrets are set from Telegram with /api set KEY SECRET. Telegram token stays in ENV.
     "mexc_api_key": "",
@@ -39,12 +39,12 @@ DEFAULTS: dict[str, Any] = {
     # micro-maker behavior
     # v0025: base ticks are kept small, but real fee/zero-fee guard can lift
     # target_ticks dynamically when MEXC charges actual fees.
-    "target_ticks": 1,
-    "stop_ticks": 4,
-    "order_lifetime_ms": 700,
+    "target_ticks": 3,
+    "stop_ticks": 1,
+    "order_lifetime_ms": 450,
     "requote_interval_ms": 200,
     "cycle_sleep_ms": 100,
-    "max_position_lifetime_sec": 45,
+    "max_position_lifetime_sec": 20,
     "post_only_entry": True,
     "post_only_close": True,
     "emergency_market_close": True,
@@ -70,7 +70,7 @@ DEFAULTS: dict[str, Any] = {
     # v0025 keeps v0023's 100 USDT because it blocked all trades on the current market.
     "min_depth_usdt": 50.0,
     # dynamic minimum: position notional * this multiplier must fit on EACH side
-    "min_depth_multiplier": 3.0,
+    "min_depth_multiplier": 2.5,
     "min_24h_volume_usdt": 0.0,
     "min_imbalance_ratio": 1.20,
     "score_top_levels": 5,
@@ -78,11 +78,11 @@ DEFAULTS: dict[str, Any] = {
     "min_trade_score": 25.0,
     "entry_recheck_ms": 120,
     "entry_recheck_required": True,
-    "entry_recheck_count": 1,
-    "cooldown_after_loss_sec": 20,
+    "entry_recheck_count": 2,
+    "cooldown_after_loss_sec": 45,
     "cooldown_after_trade_sec": 1,
     "emergency_market_close_on_time_stop": False,
-    "max_position_hard_lifetime_sec": 90,
+    "max_position_hard_lifetime_sec": 60,
     "telegram_time_offset_hours": 3.0,
     # v0025 real-profit accounting. If MEXC charges fees, one tick can show
     # green by price movement while real balance falls. These settings make
@@ -90,8 +90,8 @@ DEFAULTS: dict[str, Any] = {
     # ticks to cover entry+exit fees.
     "real_pnl_enabled": True,
     "fee_aware_target": True,
-    "min_net_profit_usdt": 0.002,
-    "max_fee_target_ticks": 18,
+    "min_net_profit_usdt": 0.004,
+    "max_fee_target_ticks": 10,
     "ignore_symbol_after_real_loss": True,
 
     # v0025: hard pre-trade fee gate. Dedicated zero-fee endpoint alone was not
@@ -102,7 +102,14 @@ DEFAULTS: dict[str, Any] = {
     "max_entry_maker_fee_rate": 0.0,
     "max_entry_taker_fee_rate": 0.0,
     "fee_guard_ignore_symbol": True,
-    "trade_profile": "zero_fee_guard_v0025",
+    "trade_profile": "edge_plus_v0027",
+    "edge_filter_enabled": True,
+    "entry_top_imbalance_ratio": 1.15,
+    "entry_microprice_min_ticks": 0.10,
+    "entry_no_adverse_move_ticks": 0.0,
+    "ban_symbol_after_real_loss": True,
+    "min_gross_profit_usdt": 0.004,
+    "real_win_min_usdt": 0.0005,
 
     # Persistently ignored symbols: regional restrictions, min/max margin/volume rejects, unsupported contracts.
     "ignored_symbols": {},
@@ -121,8 +128,8 @@ DEFAULTS: dict[str, Any] = {
     "ws_scan_rest_fallback_limit": 0,
 
     # risk guard
-    "daily_loss_limit_usdt": 0.8,
-    "max_consecutive_losses": 5,
+    "daily_loss_limit_usdt": 0.25,
+    "max_consecutive_losses": 2,
     "max_trades_per_hour": 120,
     "stop_on_api_errors": 8,
 
@@ -155,38 +162,37 @@ DEFAULTS: dict[str, Any] = {
 }
 
 
-ZERO_FEE_GUARD_PROFILE_V0025: dict[str, Any] = {
-    # Active but fee-aware mode. It still scans aggressively, but after a fill
-    # it uses real account equity delta and does not call a 1-tick move a win
-    # when exchange fees made the balance fall.
+EDGE_PLUS_PROFILE_V0027: dict[str, Any] = {
+    # Edge-plus live mode: real PnL only, fee-guard, asymmetric TP/SL,
+    # and book-quality filters before entry. Goal: fewer toxic fills and positive live expectancy.
     "leverage": 5,
     "position_margin_percent": 10.0,
     "max_positions": 1,
     "symbols_limit": 1,
     "max_zero_fee_scan_symbols": 100,
     "ws_depth_max_symbols": 100,
-    "target_ticks": 1,
-    "stop_ticks": 4,
-    "order_lifetime_ms": 700,
+    "target_ticks": 3,
+    "stop_ticks": 1,
+    "order_lifetime_ms": 450,
     "requote_interval_ms": 200,
-    "max_position_lifetime_sec": 45,
+    "max_position_lifetime_sec": 20,
     "min_depth_usdt": 50.0,
-    "min_depth_multiplier": 3.0,
+    "min_depth_multiplier": 2.5,
     "min_spread_ticks": 1,
     "max_spread_ticks": 2,
-    "min_imbalance_ratio": 1.25,
-    "min_trade_score": 28.0,
-    "entry_recheck_ms": 150,
+    "min_imbalance_ratio": 1.30,
+    "min_trade_score": 30.0,
+    "entry_recheck_ms": 120,
     "entry_recheck_required": True,
-    "entry_recheck_count": 1,
-    "cooldown_after_loss_sec": 20,
+    "entry_recheck_count": 2,
+    "cooldown_after_loss_sec": 45,
     "cooldown_after_trade_sec": 1,
     "emergency_market_close_on_time_stop": False,
-    "max_position_hard_lifetime_sec": 90,
+    "max_position_hard_lifetime_sec": 60,
     "telegram_time_offset_hours": 3.0,
     "max_trades_per_hour": 120,
-    "max_consecutive_losses": 5,
-    "daily_loss_limit_usdt": 0.8,
+    "max_consecutive_losses": 2,
+    "daily_loss_limit_usdt": 0.25,
     "switch_score_improvement_pct": 5.0,
     "min_symbol_hold_sec": 5.0,
     "mexc_private_rate_limit": 8,
@@ -194,18 +200,26 @@ ZERO_FEE_GUARD_PROFILE_V0025: dict[str, Any] = {
     "mexc_set_leverage_on_entry": False,
     "real_pnl_enabled": True,
     "fee_aware_target": True,
-    "min_net_profit_usdt": 0.002,
-    "max_fee_target_ticks": 18,
+    "min_net_profit_usdt": 0.004,
+    "max_fee_target_ticks": 10,
     "ignore_symbol_after_real_loss": True,
     "require_contract_zero_fee_on_entry": True,
     "max_entry_maker_fee_rate": 0.0,
     "max_entry_taker_fee_rate": 0.0,
     "fee_guard_ignore_symbol": True,
-    "trade_profile": "zero_fee_guard_v0025",
+    "trade_profile": "edge_plus_v0027",
+    "edge_filter_enabled": True,
+    "entry_top_imbalance_ratio": 1.15,
+    "entry_microprice_min_ticks": 0.10,
+    "entry_no_adverse_move_ticks": 0.0,
+    "ban_symbol_after_real_loss": True,
+    "min_gross_profit_usdt": 0.004,
+    "real_win_min_usdt": 0.0005,
 }
 
 # Backwards-compatible import name used by main.py.
-ACTIVE_PLUS_PROFILE_V0023 = ZERO_FEE_GUARD_PROFILE_V0025
+ZERO_FEE_GUARD_PROFILE_V0025 = EDGE_PLUS_PROFILE_V0027
+ACTIVE_PLUS_PROFILE_V0023 = EDGE_PLUS_PROFILE_V0027
 
 
 
