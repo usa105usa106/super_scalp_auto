@@ -529,10 +529,18 @@ class MexcFuturesClient:
     async def set_leverage(self, symbol: str, leverage: int, open_type: int = 1) -> dict[str, Any]:
         sid = self.contract_id(symbol)
         leverage = max(1, int(leverage or 1))
+
+        # v0018: MEXC rejects leverage changes while any order is open for the symbol
+        # (code 2019). The order/create endpoint already includes leverage, so this
+        # method is optional and disabled by default via mexc_set_leverage_on_entry.
+        if not self._bool_setting("mexc_set_leverage_on_entry", "MEXC_SET_LEVERAGE_ON_ENTRY", False):
+            log_debug("mexc_set_leverage_skipped", symbol=sid, leverage=leverage, reason="disabled; leverage is sent in order/create")
+            return {"ok": False, "skipped": True, "leverage": leverage, "symbol": sid}
+
         endpoint = "/api/v1/private/position/change_leverage"
+        # Use the documented symbol/openType body only. Sending several variants per
+        # entry triples private requests and can trigger code 510 rate limiting.
         payloads = [
-            {"symbol": sid, "leverage": leverage, "openType": int(open_type or 1), "positionType": 1},
-            {"symbol": sid, "leverage": leverage, "openType": int(open_type or 1), "positionType": 2},
             {"symbol": sid, "leverage": leverage, "openType": int(open_type or 1)},
         ]
         results, errors = [], []
@@ -544,9 +552,13 @@ class MexcFuturesClient:
                 log_debug("mexc_set_leverage_ok", body=body, response=res)
                 ok = True
             except Exception as e:
-                errors.append(str(e)[:240])
+                msg = str(e)[:240]
+                errors.append(msg)
                 log_error("mexc_set_leverage_error", e, body=body)
-        if not ok and self._bool_setting("mexc_strict_leverage", "MEXC_STRICT_LEVERAGE", True):
+                # Non-fatal MEXC responses for already configured/busy symbols.
+                if "code': 2019" in msg or 'code": 2019' in msg or "code': 510" in msg or 'code": 510' in msg or "code': 600" in msg or 'code": 600' in msg:
+                    break
+        if not ok and self._bool_setting("mexc_strict_leverage", "MEXC_STRICT_LEVERAGE", False):
             raise RuntimeError("MEXC leverage setup failed: " + " | ".join(errors[:2]))
         return {"ok": ok, "results": results, "errors": errors, "leverage": leverage}
 
@@ -585,6 +597,7 @@ class MexcFuturesClient:
     async def open_post_only(self, symbol: str, direction: str, vol: int, price: float, leverage: int, open_type: int = 1) -> dict[str, Any]:
         # 1 open long, 3 open short; type 2 post-only maker-only.
         side_code = 1 if direction == "long" else 3
+        # set_leverage is skipped by default in v0018; order/create carries leverage.
         await self.set_leverage(symbol, leverage, open_type)
         px = await self.round_price(symbol, price, "floor" if direction == "long" else "ceil")
         return await self.place_order(symbol, side_code, 2, vol, px, leverage, open_type, external_oid=f"mm_open_{int(time.time()*1000)%10**10}")

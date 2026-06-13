@@ -583,6 +583,8 @@ async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "public_timeout": "mexc_public_timeout",
         "private_timeout": "mexc_private_timeout",
         "strict_leverage": "mexc_strict_leverage",
+        "leverage_setup": "mexc_set_leverage_on_entry",
+        "set_leverage": "mexc_set_leverage_on_entry",
         "ws_endpoint": "mexc_futures_ws",
     }
     key = alias.get(args[0].lower(), args[0].lower())

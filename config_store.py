@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 DEFAULTS: dict[str, Any] = {
-    "bot_version": "v0017",
+    "bot_version": "v0018",
 
     # secrets are set from Telegram with /api set KEY SECRET. Telegram token stays in ENV.
     "mexc_api_key": "",
@@ -16,11 +16,14 @@ DEFAULTS: dict[str, Any] = {
     # These values are built in and can be changed from Telegram with /set.
     "mexc_rest_base": "https://api.mexc.com",
     "mexc_recv_window": 20000,
-    "mexc_private_rate_limit": 18,
+    "mexc_private_rate_limit": 8,
     "mexc_public_timeout": 6.0,
     "mexc_private_timeout": 15.0,
-    "mexc_strict_leverage": True,
+    "mexc_strict_leverage": False,
     "mexc_futures_ws": "wss://contract.mexc.com/edge",
+    # v0018: MEXC order/create already carries leverage; changing leverage before every maker entry
+    # causes code 2019 when orders exist and then code 510 rate-limit storms.
+    "mexc_set_leverage_on_entry": False,
 
     # live trading core
     "live_enabled": False,
@@ -154,6 +157,21 @@ class ConfigStore:
             old_ver = str(data.get("bot_version") or "")
             if old_ver != DEFAULTS["bot_version"] and float(data.get("min_depth_usdt", 5000.0)) == 5000.0:
                 out["min_depth_usdt"] = DEFAULTS["min_depth_usdt"]
+        except Exception:
+            pass
+
+        # v0018 migration: do not change leverage before every order. On MEXC this
+        # fails while maker orders are open (code 2019) and quickly creates code 510
+        # rate-limit storms. Keep leverage in the create-order payload instead.
+        try:
+            old_ver = str(data.get("bot_version") or "")
+            if old_ver != DEFAULTS["bot_version"]:
+                if "mexc_set_leverage_on_entry" not in data:
+                    out["mexc_set_leverage_on_entry"] = DEFAULTS["mexc_set_leverage_on_entry"]
+                if bool(data.get("mexc_strict_leverage", True)) is True:
+                    out["mexc_strict_leverage"] = DEFAULTS["mexc_strict_leverage"]
+                if int(float(data.get("mexc_private_rate_limit", 18))) > DEFAULTS["mexc_private_rate_limit"]:
+                    out["mexc_private_rate_limit"] = DEFAULTS["mexc_private_rate_limit"]
         except Exception:
             pass
         out["bot_version"] = DEFAULTS["bot_version"]

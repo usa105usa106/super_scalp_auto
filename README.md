@@ -1,9 +1,29 @@
-# MEXC Micro Maker LIVE Bot v0017
+# MEXC Micro Maker LIVE Bot v0016
 
 Отдельный Telegram-бот для live micro-maker / zero-fee scalping на MEXC futures.
 Старые режимы вырезаны. Из старого бота оставлен рабочий механизм MEXC API: подпись запросов, открытие/закрытие сделок, отмена ордеров, баланс, позиции, плечо, zero-fee/fee checks.
 
-## Что изменено в v0017
+## v0018: leverage/rate-limit fix
+
+v0017 started trading, but MEXC returned `code=2019` (`Leverage adjustment unavailable while orders are open`) and then `code=510` (`Requests are too frequent`).
+
+The fix is:
+
+- `mexc_set_leverage_on_entry=false` by default. The bot no longer calls `change_leverage` before every entry.
+- `mexc_strict_leverage=false` by default. Leverage setup errors no longer block an entry.
+- `mexc_private_rate_limit=8` by default to reduce private API storms.
+- Leverage is still sent in the normal `order/create` body.
+
+Telegram commands:
+
+```
+/set set_leverage off
+/set strict_leverage off
+/set rate 8
+```
+
+
+## Что изменено в v0016
 
 - Для Coolify теперь нужны только 2 переменные окружения:
   - `TELEGRAM_BOT_TOKEN`
@@ -12,7 +32,7 @@
 - MEXC API задаётся только через Telegram: `/api set API_KEY API_SECRET`.
 - MEXC REST/WS endpoint, recv-window, private rate limit, public/private timeout и strict leverage теперь лежат в runtime settings и могут меняться через `/set`.
 - `.env.example` очищен: там оставлены только токен Telegram и admin id.
-- Версия везде обновлена на `v0017`.
+- Версия везде обновлена на `v0016`.
 
 ## Coolify ENV
 
@@ -152,11 +172,3 @@ Inline-кнопки live-панели:
 - Стопы и тейки виртуальные: их исполняет сам бот. Если процесс/сервер упал, виртуальная защита не работает.
 - Перед нормальной торговлей проверь `/balance`, `/log_full clear`, 1–2 сделки минимальным объёмом, потом `/close_all` и `/log_full`.
 - `ADMIN_IDS` лучше обязательно указать, чтобы чужие пользователи не могли управлять ботом.
-
-
-## v0017 notes
-
-- Fixes the next bottleneck seen after v0016: `min_depth_usdt=5000` was too high for a micro account and rejected every symbol even when zero-fee + WS were working. New default is `50` USDT per side; if an existing runtime config still has the old default `5000`, v0017 migrates it to `50`.
-- Adds Scanner/Symbols buttons for absolute depth: `$25`, `$50`, `$100`. Command aliases: `/set depth 50` or `/set min_depth_usdt 50`.
-- Filters symbols containing `STOCK` out of the auto universe, while leaving non-STOCK metals/oil/index/crypto symbols allowed.
-- Live panel now shows reject counts, e.g. `Rejects: depth=60, spread=18`.
