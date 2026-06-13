@@ -167,6 +167,82 @@ class MicroMakerEngine:
         except Exception:
             return float(default)
 
+    async def _read_usdt_total(self, client: MexcFuturesClient) -> float | None:
+        """Return live total USDT equity, or None on read failure."""
+        try:
+            bal = await client.fetch_balance()
+            usdt = bal.get("USDT") or {}
+            total = float(usdt.get("total") or 0.0)
+            return total if total > 0 else 0.0
+        except Exception as e:
+            self._log_error("real_pnl_balance_read_error", e)
+            return None
+
+    @staticmethod
+    def _position_fee_usdt(pos: dict[str, Any]) -> float:
+        """Extract actual fee already reported by MEXC for an open position."""
+        raw = pos.get("raw") if isinstance(pos, dict) else {}
+        if not isinstance(raw, dict):
+            raw = {}
+        for key in ("totalFee", "fee", "holdFee"):
+            try:
+                val = abs(float(raw.get(key) or 0.0))
+                if val > 0:
+                    return val
+            except Exception:
+                pass
+        return 0.0
+
+    async def _fee_aware_target_ticks(self, symbol: str, contracts: int, tick: float, base_target_ticks: int, pos: dict[str, Any], s: dict[str, Any], client: MexcFuturesClient) -> tuple[int, dict[str, Any]]:
+        """Lift target ticks if real MEXC fees make 1 tick unprofitable."""
+        info: dict[str, Any] = {"enabled": bool(s.get("fee_aware_target", True)), "base_target_ticks": base_target_ticks}
+        if not bool(s.get("fee_aware_target", True)):
+            return base_target_ticks, info
+        try:
+            amount = await client.amount_from_contracts(symbol, contracts)
+            tick_value = abs(float(tick or 0.0) * float(amount or 0.0))
+            entry_fee = self._position_fee_usdt(pos)
+            # If the entry fee is visible, assume the close maker fee will be similar.
+            # With actual zero-fee this stays 0 and the target remains one tick.
+            estimated_round_fee = entry_fee * 2.0
+            min_net = max(0.0, float(s.get("min_net_profit_usdt") or 0.0))
+            needed_ticks = base_target_ticks
+            if tick_value > 0 and estimated_round_fee > 0:
+                needed_ticks = int(math.ceil((estimated_round_fee + min_net) / tick_value))
+            max_ticks = max(base_target_ticks, int(s.get("max_fee_target_ticks") or 18))
+            target_ticks = max(base_target_ticks, min(max_ticks, needed_ticks))
+            info.update({
+                "amount": amount,
+                "tick_value": tick_value,
+                "entry_fee": entry_fee,
+                "estimated_round_fee": estimated_round_fee,
+                "min_net_profit_usdt": min_net,
+                "needed_ticks": needed_ticks,
+                "max_fee_target_ticks": max_ticks,
+                "target_ticks": target_ticks,
+            })
+            return target_ticks, info
+        except Exception as e:
+            info.update({"error": str(e)[:180]})
+            return base_target_ticks, info
+
+    @staticmethod
+    def _cancel_response_has_order_closed(res: Any) -> bool:
+        try:
+            rows = res.get("data") if isinstance(res, dict) else None
+            if isinstance(rows, dict):
+                rows = [rows]
+            for row in rows or []:
+                if not isinstance(row, dict):
+                    continue
+                code = int(row.get("errorCode") or 0)
+                msg = str(row.get("errorMsg") or "").lower()
+                if code == 2041 or "state cannot be cancelled" in msg:
+                    return True
+        except Exception:
+            pass
+        return False
+
     def _increment_total_trade_counters(self, pnl: float) -> None:
         """Persist total closed-trade counters across restarts."""
         try:
@@ -202,8 +278,8 @@ class MicroMakerEngine:
             "📒 Trade counter\n"
             f"Session closed trades: {self.stats.trades} | + / -: {self.stats.wins}/{self.stats.losses} | WR: {session_wr:.1f}%\n"
             f"Total closed trades: {total} | + / -: {total_wins}/{total_losses} | WR: {total_wr:.1f}%\n"
-            f"Session Approx PnL: {self.stats.estimated_pnl:.5f} USDT\n"
-            f"Total Approx PnL: {total_pnl:.5f} USDT\n"
+            f"Session Real/Real/Approx PnL: {self.stats.estimated_pnl:.5f} USDT\n"
+            f"Total Real/Real/Approx PnL: {total_pnl:.5f} USDT\n"
             f"Loss streak: {self.stats.consecutive_losses} | API errors: {self.stats.api_errors}"
         )
 
@@ -341,7 +417,7 @@ class MicroMakerEngine:
             self._log_error("start_balance_error", e)
         self.task = asyncio.create_task(self._run_loop(), name="micro_maker_loop")
         self._log_event("start_success", start_equity=self.stats.start_equity)
-        return "▶️ Micro Maker LIVE v0023 запущен. WS depth scanner активен, авто-поиск zero-fee монет включён."
+        return "▶️ Micro Maker LIVE v0025 запущен. WS depth scanner активен, авто-поиск zero-fee монет включён."
 
     async def stop(self, close_positions: bool = False) -> str:
         self._log_event("stop_requested", close_positions=close_positions, active_tasks=list(self.active_tasks.keys()))
@@ -435,7 +511,7 @@ class MicroMakerEngine:
         cooldown_left = max(0.0, self.cooldown_until_ts - time.time())
         cooldown_txt = f" | Cooldown: {cooldown_left:.0f}s" if cooldown_left > 0 else ""
         return (
-            f"🤖 MEXC Micro Maker LIVE {s.get('bot_version', 'v0023')}\n"
+            f"🤖 MEXC Micro Maker LIVE {s.get('bot_version', 'v0025')}\n"
             f"State: {state} | Updated: {last_update}{cooldown_txt}\n"
             f"Uptime: {h:02d}:{m:02d}:{sec:02d}\n\n"
             f"⚙️ {s.get('leverage')}x | Size: {s.get('position_margin_percent', 10)}% total | "
@@ -449,9 +525,9 @@ class MicroMakerEngine:
             f"⚡ Market data: {self._market_data_status()}\n"
             f"📌 Current: {current} | Open: {opened}\n\n"
             f"📈 Session: {self.stats.trades} trades | + / -: {self.stats.wins}/{self.stats.losses} | "
-            f"Approx PnL: {self.stats.estimated_pnl:.5f} USDT\n"
+            f"Real/Approx PnL: {self.stats.estimated_pnl:.5f} USDT\n"
             f"📒 Total: {total_trades} trades | + / -: {total_wins}/{total_losses} | "
-            f"Approx PnL: {total_pnl:.5f} USDT\n"
+            f"Real/Approx PnL: {total_pnl:.5f} USDT\n"
             f"Loss streak: {self.stats.consecutive_losses} | API errors: {self.stats.api_errors}\n"
             f"Last: {self.stats.last_action or '-'}\n"
             f"Error: {self.stats.last_error or '-'}\n\n"
@@ -492,15 +568,15 @@ class MicroMakerEngine:
             "📊 Micro Maker Status\n\n"
             f"State: {'RUNNING' if self.is_running() else 'STOPPED'}\n"
             f"Active tasks: {len(self.active_tasks)} | Current: {', '.join(self.stats.current_symbols) or '-'}\n"
-            f"Version: {s.get('bot_version', 'v0023')}\n"
+            f"Version: {s.get('bot_version', 'v0025')}\n"
             f"Leverage: {s.get('leverage')}x | One trade size: {s.get('position_margin_percent', 10)}% of TOTAL USDT equity\n"
             f"Max positions: {s.get('max_positions')} | Symbols limit: {s.get('symbols_limit')}\n"
             f"Scanner: {'AUTO' if s.get('auto_select_symbols') else 'MANUAL'} | ZeroFee: {'ON' if s.get('only_zero_fee') else 'OFF'} | scan age: {age:.1f}s | rescan: {s.get('zero_fee_rescan_sec')}s\n"
             f"Zero-fee universe: {self.stats.zero_fee_universe_count or len(self.zero_fee_cache)} | active candidates: {s.get('max_zero_fee_scan_symbols')} | ignored: {self.stats.ignored_symbols_count or len(self._ignored_symbols(s))}\n"
             f"Market data: {self._market_data_status()} | mode={s.get('market_data_mode')}\n"
             f"Target/Stop: {s.get('target_ticks')}/{s.get('stop_ticks')} ticks | Emergency: {'ON' if s.get('emergency_market_close') else 'OFF'}\n"
-            f"Session trades: {self.stats.trades} | + / -: {self.stats.wins}/{self.stats.losses} | Approx PnL: {self.stats.estimated_pnl:.5f} USDT\n"
-            f"Total trades: {total_trades} | + / -: {total_wins}/{total_losses} | Total Approx PnL: {total_pnl:.5f} USDT\n"
+            f"Session trades: {self.stats.trades} | + / -: {self.stats.wins}/{self.stats.losses} | Real/Approx PnL: {self.stats.estimated_pnl:.5f} USDT\n"
+            f"Total trades: {total_trades} | + / -: {total_wins}/{total_losses} | Total Real/Real/Approx PnL: {total_pnl:.5f} USDT\n"
             f"Consecutive losses: {self.stats.consecutive_losses} | API errors: {self.stats.api_errors}\n"
             f"Last: {self.stats.last_action}\n"
             f"Error: {self.stats.last_error or '-'}\n\n"
@@ -548,7 +624,7 @@ class MicroMakerEngine:
 
     async def _run_loop(self) -> None:
         self._log_event("run_loop_started")
-        await self._notify("✅ LIVE loop v0023 started. WS depth scanner активен, авто-сканер zero-fee монет включён, TP/SL виртуальные внутри бота.")
+        await self._notify("✅ LIVE loop v0025 started. WS depth scanner активен, авто-сканер zero-fee монет включён, TP/SL виртуальные внутри бота.")
         while self.running:
             try:
                 s = self._settings()
@@ -878,6 +954,46 @@ class MicroMakerEngine:
             return "short"
         return None
 
+    async def _pretrade_fee_guard(self, symbol: str, s: dict[str, Any], client: MexcFuturesClient) -> bool:
+        """Return True only when this exact contract is cheap enough to scalp.
+
+        The dedicated zero-fee universe can include symbols that still produce
+        real fees on this API account. Live SOL showed this: virtual +ticks but
+        balance decreased. This guard queries the exact contract fee endpoint
+        right before placing a real order and blocks any non-zero maker/taker
+        fee when require_contract_zero_fee_on_entry is enabled.
+        """
+        if not bool(s.get("require_contract_zero_fee_on_entry", True)):
+            return True
+        max_maker = float(s.get("max_entry_maker_fee_rate") or 0.0)
+        max_taker = float(s.get("max_entry_taker_fee_rate") or 0.0)
+        eps = 1e-12
+        try:
+            rates = await client.fetch_contract_fee_rates(symbol)
+            row = rates.get(MexcFuturesClient.contract_id(symbol)) if isinstance(rates, dict) else None
+            if not row:
+                self.stats.last_action = f"{symbol}: fee guard skip, contract fee not verified"
+                self._log_event("pretrade_fee_guard_skip", symbol=symbol, reason="fee_rate_missing", rates=rates)
+                return False
+            maker = float(row.get("maker") if row.get("maker") is not None else 1.0)
+            taker = float(row.get("taker") if row.get("taker") is not None else 1.0)
+            is_zero = row.get("is_zero")
+            ok = (maker <= max_maker + eps) and (taker <= max_taker + eps) and (is_zero is not False)
+            if ok:
+                self._log_debug("pretrade_fee_guard_ok", symbol=symbol, maker=maker, taker=taker, is_zero=is_zero, source=row.get("source"))
+                return True
+            reason = f"fee guard: maker={maker:g}, taker={taker:g}, is_zero={is_zero}"
+            self.stats.last_action = f"{symbol}: skipped, {reason}"
+            self._log_event("pretrade_fee_guard_reject", symbol=symbol, maker=maker, taker=taker, is_zero=is_zero, source=row.get("source"), raw=row.get("raw"))
+            if bool(s.get("fee_guard_ignore_symbol", True)):
+                self._ignore_symbol(symbol, reason)
+            return False
+        except Exception as e:
+            self.stats.last_action = f"{symbol}: fee guard error, skipped"
+            self.stats.last_error = str(e)[:220]
+            self._log_error("pretrade_fee_guard_error", e, symbol=symbol)
+            return False
+
     async def _trade_cycle(self, symbol: str) -> None:
         self._log_event("trade_cycle_start", symbol=symbol)
         if self._is_ignored_symbol(symbol):
@@ -919,7 +1035,7 @@ class MicroMakerEngine:
             self.stats.last_action = f"{symbol}: no imbalance"
             self._log_debug("trade_cycle_no_imbalance", symbol=symbol, bid=bid, ask=ask)
             return
-        # v0023 active-plus mode: require a quick recheck of spread and imbalance
+        # v0025 zero-fee-guard mode: require a quick recheck of spread and imbalance
         # direction on several checks. This reduces trades, but avoids flickering books.
         recheck_ms = int(float(s.get("entry_recheck_ms") or 0))
         recheck_count = max(1, int(float(s.get("entry_recheck_count") or 1)))
@@ -943,6 +1059,9 @@ class MicroMakerEngine:
                     self._log_debug("trade_cycle_recheck_direction_changed", symbol=symbol, check=idx + 1, old_direction=direction, new_direction=direction2, bid=bid2, ask=ask2)
                     return
                 bid, ask, book, spread_ticks = bid2, ask2, book2, spread_ticks2
+
+        if not await self._pretrade_fee_guard(symbol, s, client):
+            return
 
         entry_price = bid if direction == "long" else ask
         leverage = int(s.get("leverage") or 5)
@@ -976,8 +1095,9 @@ class MicroMakerEngine:
             self._ignore_symbol(symbol, reason)
             self._log_event("trade_cycle_min_order_too_large", symbol=symbol, reason=reason)
             return
+        equity_before = await self._read_usdt_total(client) if bool(s.get("real_pnl_enabled", True)) else None
         self.stats.last_action = f"{symbol}: entry {direction} vol={vol} px={entry_price} margin={actual_margin:.4f}/{margin_usdt:.4f} ({margin_note})"
-        self._log_event("entry_order_prepare", symbol=symbol, direction=direction, vol=vol, entry_price=entry_price, leverage=leverage, open_type=open_type, actual_margin=actual_margin, desired_margin=margin_usdt, margin_note=margin_note, bid=bid, ask=ask, spread_ticks=spread_ticks, book_source=book.get("source"))
+        self._log_event("entry_order_prepare", symbol=symbol, direction=direction, vol=vol, entry_price=entry_price, leverage=leverage, open_type=open_type, actual_margin=actual_margin, desired_margin=margin_usdt, margin_note=margin_note, bid=bid, ask=ask, spread_ticks=spread_ticks, book_source=book.get("source"), equity_before=equity_before)
         try:
             order = await client.open_post_only(symbol, direction, vol, entry_price, leverage, open_type)
         except Exception as e:
@@ -1013,24 +1133,25 @@ class MicroMakerEngine:
             self.stats.open_position_symbols.append(symbol)
         self._log_event("entry_filled", symbol=symbol, direction=direction, position=pos)
         await self._notify(f"✅ FILLED {symbol} {direction.upper()} contracts={pos.get('contracts')} entry={pos.get('entryPrice') or entry_price}")
-        await self._manage_position(symbol, direction, pos, s)
+        await self._manage_position(symbol, direction, pos, s, equity_before=equity_before)
 
-    async def _manage_position(self, symbol: str, direction: str, pos: dict[str, Any], s: dict[str, Any]) -> None:
+    async def _manage_position(self, symbol: str, direction: str, pos: dict[str, Any], s: dict[str, Any], equity_before: float | None = None) -> None:
         client = await self._ensure_client()
         leverage = int(s.get("leverage") or 5)
         open_type = int(s.get("open_type") or 1)
         tick = await client.price_tick(symbol)
         entry = float(pos.get("entryPrice") or 0) or (await client.ticker(symbol))["last"]
         contracts = int(round(float(pos.get("contracts") or 0)))
-        target_ticks = int(s.get("target_ticks") or 1)
+        base_target_ticks = int(s.get("target_ticks") or 1)
         stop_ticks = int(s.get("stop_ticks") or 3)
+        target_ticks, fee_target_info = await self._fee_aware_target_ticks(symbol, contracts, tick, base_target_ticks, pos, s, client)
         max_life = float(s.get("max_position_lifetime_sec") or 15)
         close_order_id: str | None = None
         close_order_ts = 0.0
         started = time.time()
         exit_price_est = entry
         reason = "unknown"
-        self._log_event("manage_position_start", symbol=symbol, direction=direction, entry=entry, contracts=contracts, target_ticks=target_ticks, stop_ticks=stop_ticks, max_life=max_life)
+        self._log_event("manage_position_start", symbol=symbol, direction=direction, entry=entry, contracts=contracts, base_target_ticks=base_target_ticks, target_ticks=target_ticks, stop_ticks=stop_ticks, max_life=max_life, equity_before=equity_before, fee_target=fee_target_info)
         while self.running:
             current = await client.find_position(symbol, direction)
             if not current:
@@ -1073,14 +1194,35 @@ class MicroMakerEngine:
                     if close_order_id:
                         cancel_res = await client.cancel_order(close_order_id, symbol)
                         self._log_debug("close_order_requote_cancel", symbol=symbol, order_id=close_order_id, result=cancel_res)
+                        if self._cancel_response_has_order_closed(cancel_res):
+                            current_after_cancel = await client.find_position(symbol, direction)
+                            if not current_after_cancel:
+                                reason = "target/closed"
+                                self._log_event("close_order_already_filled_on_cancel", symbol=symbol, order_id=close_order_id, cancel_result=cancel_res)
+                                break
                 except Exception as e:
                     self._log_error("close_order_requote_cancel_error", e, symbol=symbol, order_id=close_order_id)
+                # Re-check right before a new close order. The previous maker close can fill
+                # between cancel and re-quote; MEXC then returns code 2009, which is not a
+                # real API failure for us.
+                current_before_close = await client.find_position(symbol, direction)
+                if not current_before_close:
+                    reason = "target/closed"
+                    self._log_event("position_closed_before_requote", symbol=symbol, direction=direction)
+                    break
                 if maker_time_exit:
                     # After soft lifetime, stop insisting on TP and work a maker exit at the best opposite quote.
                     close_px = ask if direction == "long" else bid
                 else:
                     close_px = max(ask, target) if direction == "long" else min(bid, target)
-                order = await client.close_limit(symbol, direction, contracts, close_px, leverage, open_type, post_only=bool(s.get("post_only_close")))
+                try:
+                    order = await client.close_limit(symbol, direction, contracts, close_px, leverage, open_type, post_only=bool(s.get("post_only_close")))
+                except Exception as e:
+                    if "2009" in str(e) or "nonexistent or closed" in str(e).lower():
+                        reason = "target/closed"
+                        self._log_event("close_order_position_already_closed", symbol=symbol, direction=direction, close_px=close_px, error=str(e)[:220])
+                        break
+                    raise
                 self._log_event("close_order_submitted", symbol=symbol, direction=direction, contracts=contracts, close_px=close_px, target=target, order=order)
                 close_order_id = order.get("id")
                 close_order_ts = time.time()
@@ -1099,7 +1241,13 @@ class MicroMakerEngine:
             else:
                 self._log_event("final_market_close_skipped", symbol=symbol, still=still, reason=reason)
         amount = await client.amount_from_contracts(symbol, contracts)
-        pnl = (exit_price_est - entry) * amount if direction == "long" else (entry - exit_price_est) * amount
+        virtual_pnl = (exit_price_est - entry) * amount if direction == "long" else (entry - exit_price_est) * amount
+        equity_after = await self._read_usdt_total(client) if bool(s.get("real_pnl_enabled", True)) else None
+        real_pnl = None
+        if equity_before is not None and equity_after is not None:
+            real_pnl = float(equity_after) - float(equity_before)
+        pnl = real_pnl if real_pnl is not None else virtual_pnl
+        pnl_source = "real_balance" if real_pnl is not None else "virtual_price"
         self.stats.estimated_pnl += pnl
         self.stats.trades += 1
         self._increment_total_trade_counters(pnl)
@@ -1114,8 +1262,10 @@ class MicroMakerEngine:
             if pause > 0:
                 self.cooldown_until_ts = max(self.cooldown_until_ts, time.time() + pause)
                 self._log_event("loss_cooldown_started", symbol=symbol, pause_sec=pause, cooldown_until=self.cooldown_until_ts)
-        self.stats.last_action = f"{symbol}: closed {reason}, est pnl={pnl:.6f}"
-        self._log_event("trade_closed", symbol=symbol, direction=direction, reason=reason, entry=entry, exit_price_est=exit_price_est, contracts=contracts, amount=amount, pnl=pnl, session_trades=self.stats.trades, session_wins=self.stats.wins, session_losses=self.stats.losses)
+            if bool(s.get("ignore_symbol_after_real_loss", True)) and pnl_source == "real_balance":
+                self._ignore_symbol(symbol, f"real pnl negative: {pnl:.6f} USDT; virtual={virtual_pnl:.6f}")
+        self.stats.last_action = f"{symbol}: closed {reason}, pnl={pnl:.6f} ({pnl_source})"
+        self._log_event("trade_closed", symbol=symbol, direction=direction, reason=reason, entry=entry, exit_price_est=exit_price_est, contracts=contracts, amount=amount, pnl=pnl, pnl_source=pnl_source, virtual_pnl=virtual_pnl, equity_before=equity_before, equity_after=equity_after, session_trades=self.stats.trades, session_wins=self.stats.wins, session_losses=self.stats.losses)
         if symbol in self.stats.open_position_symbols:
             self.stats.open_position_symbols.remove(symbol)
-        await self._notify(f"🏁 CLOSED {symbol} {direction.upper()} reason={reason} est_pnl={pnl:.6f} USDT")
+        await self._notify(f"🏁 CLOSED {symbol} {direction.upper()} reason={reason} pnl={pnl:.6f} USDT ({pnl_source})")

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 DEFAULTS: dict[str, Any] = {
-    "bot_version": "v0023",
+    "bot_version": "v0025",
 
     # secrets are set from Telegram with /api set KEY SECRET. Telegram token stays in ENV.
     "mexc_api_key": "",
@@ -37,12 +37,14 @@ DEFAULTS: dict[str, Any] = {
     "symbols_limit": 1,
 
     # micro-maker behavior
+    # v0025: base ticks are kept small, but real fee/zero-fee guard can lift
+    # target_ticks dynamically when MEXC charges actual fees.
     "target_ticks": 1,
-    "stop_ticks": 1,
-    "order_lifetime_ms": 550,
+    "stop_ticks": 4,
+    "order_lifetime_ms": 700,
     "requote_interval_ms": 200,
     "cycle_sleep_ms": 100,
-    "max_position_lifetime_sec": 18,
+    "max_position_lifetime_sec": 45,
     "post_only_entry": True,
     "post_only_close": True,
     "emergency_market_close": True,
@@ -65,14 +67,14 @@ DEFAULTS: dict[str, Any] = {
     "min_spread_ticks": 1,
     "max_spread_ticks": 2,
     # absolute minimum depth on EACH side of the top book levels.
-    # v0023 lowers v0022's 100 USDT because it blocked all trades on the current market.
+    # v0025 keeps v0023's 100 USDT because it blocked all trades on the current market.
     "min_depth_usdt": 50.0,
     # dynamic minimum: position notional * this multiplier must fit on EACH side
     "min_depth_multiplier": 3.0,
     "min_24h_volume_usdt": 0.0,
     "min_imbalance_ratio": 1.20,
     "score_top_levels": 5,
-    # v0023 active-plus profile: more trades than v0022, but still filters thin/flickering books.
+    # v0025 real-profit profile: active scanner with real-balance PnL and fee-aware targets.
     "min_trade_score": 25.0,
     "entry_recheck_ms": 120,
     "entry_recheck_required": True,
@@ -80,9 +82,28 @@ DEFAULTS: dict[str, Any] = {
     "cooldown_after_loss_sec": 20,
     "cooldown_after_trade_sec": 1,
     "emergency_market_close_on_time_stop": False,
-    "max_position_hard_lifetime_sec": 45,
+    "max_position_hard_lifetime_sec": 90,
     "telegram_time_offset_hours": 3.0,
-    "trade_profile": "active_plus_v0023",
+    # v0025 real-profit accounting. If MEXC charges fees, one tick can show
+    # green by price movement while real balance falls. These settings make
+    # the panel/counters use real equity delta and automatically require enough
+    # ticks to cover entry+exit fees.
+    "real_pnl_enabled": True,
+    "fee_aware_target": True,
+    "min_net_profit_usdt": 0.002,
+    "max_fee_target_ticks": 18,
+    "ignore_symbol_after_real_loss": True,
+
+    # v0025: hard pre-trade fee gate. Dedicated zero-fee endpoint alone was not
+    # enough on live SOL: the position reported real fees and balance fell.
+    # Before every real entry we also query contract fee_rate for that exact symbol.
+    # If maker/taker fees are non-zero, the symbol is skipped/ignored for the session.
+    "require_contract_zero_fee_on_entry": True,
+    "max_entry_maker_fee_rate": 0.0,
+    "max_entry_taker_fee_rate": 0.0,
+    "fee_guard_ignore_symbol": True,
+    "trade_profile": "zero_fee_guard_v0025",
+
     # Persistently ignored symbols: regional restrictions, min/max margin/volume rejects, unsupported contracts.
     "ignored_symbols": {},
     "max_ignored_symbols": 1000,
@@ -134,10 +155,10 @@ DEFAULTS: dict[str, Any] = {
 }
 
 
-ACTIVE_PLUS_PROFILE_V0023: dict[str, Any] = {
-    # Active micro-maker mode: many more attempts than v0022.
-    # Goal: collect one-tick maker exits while avoiding the worst thin/noisy books.
-    # Profit is not guaranteed; this profile is tuned to trade, not to sit idle.
+ZERO_FEE_GUARD_PROFILE_V0025: dict[str, Any] = {
+    # Active but fee-aware mode. It still scans aggressively, but after a fill
+    # it uses real account equity delta and does not call a 1-tick move a win
+    # when exchange fees made the balance fall.
     "leverage": 5,
     "position_margin_percent": 10.0,
     "max_positions": 1,
@@ -145,23 +166,23 @@ ACTIVE_PLUS_PROFILE_V0023: dict[str, Any] = {
     "max_zero_fee_scan_symbols": 100,
     "ws_depth_max_symbols": 100,
     "target_ticks": 1,
-    "stop_ticks": 1,
-    "order_lifetime_ms": 550,
+    "stop_ticks": 4,
+    "order_lifetime_ms": 700,
     "requote_interval_ms": 200,
-    "max_position_lifetime_sec": 18,
+    "max_position_lifetime_sec": 45,
     "min_depth_usdt": 50.0,
     "min_depth_multiplier": 3.0,
     "min_spread_ticks": 1,
     "max_spread_ticks": 2,
-    "min_imbalance_ratio": 1.20,
-    "min_trade_score": 25.0,
-    "entry_recheck_ms": 120,
+    "min_imbalance_ratio": 1.25,
+    "min_trade_score": 28.0,
+    "entry_recheck_ms": 150,
     "entry_recheck_required": True,
     "entry_recheck_count": 1,
     "cooldown_after_loss_sec": 20,
     "cooldown_after_trade_sec": 1,
     "emergency_market_close_on_time_stop": False,
-    "max_position_hard_lifetime_sec": 45,
+    "max_position_hard_lifetime_sec": 90,
     "telegram_time_offset_hours": 3.0,
     "max_trades_per_hour": 120,
     "max_consecutive_losses": 5,
@@ -171,8 +192,20 @@ ACTIVE_PLUS_PROFILE_V0023: dict[str, Any] = {
     "mexc_private_rate_limit": 8,
     "mexc_strict_leverage": False,
     "mexc_set_leverage_on_entry": False,
-    "trade_profile": "active_plus_v0023",
+    "real_pnl_enabled": True,
+    "fee_aware_target": True,
+    "min_net_profit_usdt": 0.002,
+    "max_fee_target_ticks": 18,
+    "ignore_symbol_after_real_loss": True,
+    "require_contract_zero_fee_on_entry": True,
+    "max_entry_maker_fee_rate": 0.0,
+    "max_entry_taker_fee_rate": 0.0,
+    "fee_guard_ignore_symbol": True,
+    "trade_profile": "zero_fee_guard_v0025",
 }
+
+# Backwards-compatible import name used by main.py.
+ACTIVE_PLUS_PROFILE_V0023 = ZERO_FEE_GUARD_PROFILE_V0025
 
 
 
@@ -245,13 +278,13 @@ class ConfigStore:
                     out["mexc_private_rate_limit"] = DEFAULTS["mexc_private_rate_limit"]
         except Exception:
             pass
-        # v0023 migration: user requested more trades after v0022 was too strict.
-        # Apply only strategy/risk filters; never touch API keys, counters, panel ids, or ignored symbols.
+        # v0025 migration: keep the active scanner, but switch accounting to real
+        # balance delta and enable fee-aware targets. Never touch API keys, counters,
+        # panel ids. Ignored cache is session-only and is cleared on start above.
         try:
             old_ver = str(data.get("bot_version") or "")
             if old_ver != DEFAULTS["bot_version"] and str(data.get("trade_profile") or "") != "custom":
-                out.update(ACTIVE_PLUS_PROFILE_V0023)
-                # Do not carry bad temporary ignores caused by low free margin / old bugs.
+                out.update(ZERO_FEE_GUARD_PROFILE_V0025)
                 out["ignored_symbols"] = {}
         except Exception:
             pass
