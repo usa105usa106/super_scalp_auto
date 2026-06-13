@@ -25,15 +25,43 @@ class MexcFuturesClient:
     openType 1 = isolated, 2 = cross
     """
 
-    def __init__(self, api_key: str = "", api_secret: str = "", base_url: str | None = None):
+    def __init__(self, api_key: str = "", api_secret: str = "", base_url: str | None = None, settings: dict[str, Any] | None = None):
         self.api_key = str(api_key or "").strip()
         self.api_secret = str(api_secret or "").strip()
-        self.base_url = (base_url or os.getenv("MEXC_REST_BASE", "https://api.mexc.com")).rstrip("/")
+        self.settings: dict[str, Any] = dict(settings or {})
+        self.base_url = (base_url or self._setting("mexc_rest_base", "MEXC_REST_BASE", "https://api.mexc.com")).rstrip("/")
         self.time_difference_ms = 0
         self._private_request_times: deque[float] = deque()
         self._private_lock = asyncio.Lock()
         self._details_cache: dict[str, dict[str, Any]] = {}
         self._details_cache_ts = 0.0
+
+    def update_settings(self, settings: dict[str, Any] | None = None) -> None:
+        self.settings = dict(settings or {})
+        self.base_url = str(self._setting("mexc_rest_base", "MEXC_REST_BASE", "https://api.mexc.com") or "https://api.mexc.com").rstrip("/")
+
+    def _setting(self, key: str, env_key: str, default: Any) -> Any:
+        if isinstance(self.settings, dict) and key in self.settings and self.settings.get(key) not in (None, ""):
+            return self.settings.get(key)
+        return os.getenv(env_key, str(default))
+
+    def _int_setting(self, key: str, env_key: str, default: int) -> int:
+        try:
+            return int(float(self._setting(key, env_key, default)))
+        except Exception:
+            return int(default)
+
+    def _float_setting(self, key: str, env_key: str, default: float) -> float:
+        try:
+            return float(self._setting(key, env_key, default))
+        except Exception:
+            return float(default)
+
+    def _bool_setting(self, key: str, env_key: str, default: bool) -> bool:
+        value = self._setting(key, env_key, default)
+        if isinstance(value, bool):
+            return value
+        return str(value).lower() in {"1", "true", "yes", "on", "да", "вкл"}
 
     # ---------- symbol / precision helpers ----------
 
@@ -196,7 +224,7 @@ class MexcFuturesClient:
         return self.time_difference_ms
 
     async def _private_rate_limit(self) -> None:
-        limit = int(os.getenv("MEXC_PRIVATE_RATE_LIMIT", "18") or "18")
+        limit = self._int_setting("mexc_private_rate_limit", "MEXC_PRIVATE_RATE_LIMIT", 18)
         window = 2.0
         async with self._private_lock:
             now = time.monotonic()
@@ -215,7 +243,7 @@ class MexcFuturesClient:
 
     def _recv_window(self) -> str:
         try:
-            value = int(float(os.getenv("MEXC_RECV_WINDOW", "20000") or "20000"))
+            value = self._int_setting("mexc_recv_window", "MEXC_RECV_WINDOW", 20000)
         except Exception:
             value = 20000
         if value > 1000:
@@ -227,7 +255,7 @@ class MexcFuturesClient:
         query = dict(query or {})
         qs = urlencode(sorted((k, v) for k, v in query.items() if v is not None))
         url = f"{self.base_url}{path}" + (f"?{qs}" if qs else "")
-        timeout = aiohttp.ClientTimeout(total=float(os.getenv("MEXC_PUBLIC_TIMEOUT", "6") or 6))
+        timeout = aiohttp.ClientTimeout(total=self._float_setting("mexc_public_timeout", "MEXC_PUBLIC_TIMEOUT", 6.0))
         started = time.perf_counter()
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -286,7 +314,7 @@ class MexcFuturesClient:
             "Content-Type": "application/json",
             "User-Agent": "Mozilla/5.0",
         }
-        timeout = aiohttp.ClientTimeout(total=float(os.getenv("MEXC_PRIVATE_TIMEOUT", "15") or 15))
+        timeout = aiohttp.ClientTimeout(total=self._float_setting("mexc_private_timeout", "MEXC_PRIVATE_TIMEOUT", 15.0))
         started = time.perf_counter()
         log_debug("mexc_private_request", method=method, path=path, query=query, body=body)
         try:
@@ -518,7 +546,7 @@ class MexcFuturesClient:
             except Exception as e:
                 errors.append(str(e)[:240])
                 log_error("mexc_set_leverage_error", e, body=body)
-        if not ok and os.getenv("MEXC_STRICT_LEVERAGE", "true").lower() in {"1", "true", "yes", "on"}:
+        if not ok and self._bool_setting("mexc_strict_leverage", "MEXC_STRICT_LEVERAGE", True):
             raise RuntimeError("MEXC leverage setup failed: " + " | ".join(errors[:2]))
         return {"ok": ok, "results": results, "errors": errors, "leverage": leverage}
 

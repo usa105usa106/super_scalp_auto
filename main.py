@@ -26,6 +26,65 @@ PANEL_UPDATE_TASK: asyncio.Task | None = None
 PROCESS_START_TS = time.time()
 
 
+def get_admin_ids() -> set[int]:
+    """Optional Telegram access control.
+
+    If ADMIN_IDS is empty, the bot is open to whoever can chat with it.
+    If ADMIN_IDS is set, only those Telegram user IDs can use commands/buttons.
+    Example: ADMIN_IDS=123456789,987654321
+    """
+    raw = os.getenv("ADMIN_IDS", "").strip()
+    if not raw:
+        return set()
+    out: set[int] = set()
+    for part in raw.replace(";", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            out.add(int(part))
+        except ValueError:
+            continue
+    return out
+
+
+def is_admin_update(update: Update) -> bool:
+    ids = get_admin_ids()
+    if not ids:
+        return True
+    user = update.effective_user
+    return bool(user and user.id in ids)
+
+
+async def reject_non_admin(update: Update) -> None:
+    try:
+        log_event(
+            "telegram_unauthorized_access",
+            user_id=getattr(update.effective_user, "id", None),
+            username=getattr(update.effective_user, "username", None),
+            chat_id=getattr(update.effective_chat, "id", None),
+        )
+    except Exception:
+        pass
+    try:
+        if update.callback_query:
+            await update.callback_query.answer("⛔ Нет доступа", show_alert=True)
+            return
+        if update.effective_message:
+            await update.effective_message.reply_text("⛔ Нет доступа")
+    except Exception:
+        pass
+
+
+def admin_guard(handler):
+    async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not is_admin_update(update):
+            await reject_non_admin(update)
+            return
+        await handler(update, context)
+    return wrapped
+
+
 def b(text: str, data: str) -> InlineKeyboardButton:
     return InlineKeyboardButton(text, callback_data=data)
 
@@ -130,19 +189,19 @@ def ping_text(update: Update | None = None, started_perf: float | None = None) -
         except Exception:
             telegram_lag = "n/a"
     return (
-        f"🏓 Ping {s.get('bot_version', 'v0013')}\n\n"
+        f"🏓 Ping {s.get('bot_version', 'v0015')}\n\n"
         f"Отклик обработчика: {processing_ms:.1f} ms\n"
         f"Telegram lag: {telegram_lag}\n"
         f"Память: {memory_usage_text()}\n"
         f"Время работы процесса: {format_duration(time.time() - PROCESS_START_TS)}\n"
-        f"Версия: {s.get('bot_version', 'v0013')}"
+        f"Версия: {s.get('bot_version', 'v0015')}"
     )
 
 
 def settings_text() -> str:
     s = STORE.load()
     return (
-        f"⚙️ Micro Maker Settings ({s.get('bot_version', 'v0013')})\n\n"
+        f"⚙️ Micro Maker Settings ({s.get('bot_version', 'v0015')})\n\n"
         f"Leverage: {s['leverage']}x\n"
         f"Max positions: {s['max_positions']}\n"
         f"Symbols limit: {s['symbols_limit']}\n"
@@ -153,6 +212,8 @@ def settings_text() -> str:
         f"Order lifetime: {s['order_lifetime_ms']} ms\n"
         f"Requote: {s['requote_interval_ms']} ms\n"
         f"Panel: normal {s.get('telegram_live_update_sec')}s | open {s.get('telegram_live_fast_update_sec')}s | stopped {'OFF' if float(s.get('telegram_live_stopped_update_sec') or 0) <= 0 else str(s.get('telegram_live_stopped_update_sec')) + 's'}\n"
+        f"MEXC REST: {s.get('mexc_rest_base')} | recv {s.get('mexc_recv_window')} | rate {s.get('mexc_private_rate_limit')}/2s\n"
+        f"MEXC WS: {s.get('mexc_futures_ws')}\n"
         f"Direction: {s['direction_mode']}\n"
         f"Post-only close: {'ON' if s['post_only_close'] else 'OFF'}\n"
         f"Emergency market close: {'ON' if s['emergency_market_close'] else 'OFF'}\n\n"
@@ -235,7 +296,7 @@ def api_text() -> str:
         "Сохранить: /api set API_KEY API_SECRET\n"
         "Проверить: /api status\n"
         "Удалить: /api clear\n\n"
-        "В v0013 команда /api set автоматически удаляется из чата, чтобы ключи не висели в истории."
+        "В v0015 команда /api set автоматически удаляется из чата, чтобы ключи не висели в истории."
     )
 
 
@@ -261,7 +322,7 @@ def panel_text(engine: MicroMakerEngine | None = None) -> str:
         return e.quick_status_text()
     s = STORE.load()
     return (
-        f"🤖 MEXC Micro Maker LIVE {s.get('bot_version', 'v0013')}\n"
+        f"🤖 MEXC Micro Maker LIVE {s.get('bot_version', 'v0015')}\n"
         "State: STOPPED\n\n"
         f"⚙️ {s.get('leverage')}x | Size: {s.get('position_margin_percent', 10)}% total | "
         f"Pos: {s.get('max_positions')} | Symbols: {s.get('symbols_limit')}\n"
@@ -388,7 +449,7 @@ async def update_live_panel(app: Application, force: bool = False) -> None:
 async def live_panel_loop(app: Application) -> None:
     """Smart live-panel refresh.
 
-    Defaults in v0013:
+    Defaults in v0015:
     - STOPPED: no automatic refresh, so the panel is readable and quiet.
     - RUNNING without an open position: every 5 seconds.
     - RUNNING with an open position: every 2 seconds.
@@ -510,6 +571,16 @@ async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "panel_sec": "telegram_live_update_sec",
         "panel_fast_sec": "telegram_live_fast_update_sec",
         "panel_stopped_sec": "telegram_live_stopped_update_sec",
+        "rest_base": "mexc_rest_base",
+        "base": "mexc_rest_base",
+        "recv": "mexc_recv_window",
+        "recv_window": "mexc_recv_window",
+        "rate": "mexc_private_rate_limit",
+        "private_rate": "mexc_private_rate_limit",
+        "public_timeout": "mexc_public_timeout",
+        "private_timeout": "mexc_private_timeout",
+        "strict_leverage": "mexc_strict_leverage",
+        "ws_endpoint": "mexc_futures_ws",
     }
     key = alias.get(args[0].lower(), args[0].lower())
     if key not in DEFAULTS:
@@ -685,7 +756,7 @@ async def log_full_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     try:
         log_event("log_full_export_requested", chat_id=chat_id)
         path = export_full_log(STORE.load(), engine)
-        caption = f"📄 Full debug log {STORE.load().get('bot_version', 'v0013')}\nОшибки, скан монет, переключения, ордера, закрытия и MEXC API-события."
+        caption = f"📄 Full debug log {STORE.load().get('bot_version', 'v0015')}\nОшибки, скан монет, переключения, ордера, закрытия и MEXC API-события."
         with open(path, "rb") as f:
             await context.bot.send_document(
                 chat_id=chat_id,
@@ -707,7 +778,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await install_command_keyboard(context, chat_id)
     s = STORE.load()
     txt = (
-        f"🆘 Help — MEXC Micro Maker {s.get('bot_version', 'v0013')}\n\n"
+        f"🆘 Help — MEXC Micro Maker {s.get('bot_version', 'v0015')}\n\n"
         "Как запустить в один клик:\n"
         "1) Один раз сохрани API: /api set API_KEY API_SECRET\n"
         "2) Нажми ▶️ Start LIVE на live-панели. По умолчанию включены автоторговля, FULL AUTO поиск монет и OnlyZeroFee.\n\n"
@@ -728,6 +799,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/close_all или /closeall — остановить бота, отменить все активные/лимитные/plan/stop ордера и закрыть все позиции market\n"
         "Кнопка ⏸ Stop — пауза: останавливает торговый цикл и фоновый скан, позиции market не закрывает.\n"
         "Кнопка ❌ Close All — полная очистка биржи: ордера снести, позиции закрыть market.\n\n"
+        "Coolify ENV:\n"
+        "В Coolify нужны только TELEGRAM_BOT_TOKEN и ADMIN_IDS. Остальные MEXC/сканер/риск настройки уже заданы по умолчанию и меняются через Telegram.\n\n"
         "API:\n"
         "/api set API_KEY API_SECRET — сохранить MEXC API, сообщение с ключами удаляется из чата\n"
         "/api status — показать, сохранены ли ключи\n"
@@ -754,8 +827,15 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/set candidates 80 — сколько активных zero-fee монет держать в быстром WS/scoring окне\n"
         "/set panel_sec 5 — обычная частота live-сообщения\n"
         "/set panel_fast_sec 2 — частота, когда есть открытая позиция\n"
-        "/set panel_stopped_sec 0 — не обновлять панель в STOPPED\n\n"
-        "Кеш в v0013: zero-fee universe пересобирается каждые 60 секунд; если rescan упал, рабочий список не стирается. "
+        "/set panel_stopped_sec 0 — не обновлять панель в STOPPED\n"
+        "/set rest_base https://api.mexc.com — MEXC REST endpoint\n"
+        "/set recv 20000 — recv-window по умолчанию\n"
+        "/set rate 18 — private API лимит на 2 секунды внутри бота\n"
+        "/set public_timeout 6 — timeout публичных REST-запросов\n"
+        "/set private_timeout 15 — timeout приватных REST-запросов\n"
+        "/set strict_leverage on — ошибка плеча блокирует сделку, off — не блокирует\n"
+        "/set ws_endpoint wss://contract.mexc.com/edge — MEXC futures WS endpoint\n\n"
+        "Кеш в v0015: zero-fee universe пересобирается каждые 60 секунд; если rescan упал, рабочий список не стирается. "
         "Монеты, которые регионально запрещены, unsupported или не проходят min/max margin/volume, автоматически уходят в ignore.\n\n"
         "Важно: стопы/тейки виртуальные, их исполняет сам бот. Если процесс выключен, виртуальная защита не работает. "
         "Для полной очистки всегда используй ❌ Close All или /close_all."
@@ -809,7 +889,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if data == "mm:fees":
         s = STORE.load()
         try:
-            client = MexcFuturesClient(s.get("mexc_api_key"), s.get("mexc_api_secret"))
+            client = MexcFuturesClient(s.get("mexc_api_key"), s.get("mexc_api_secret"), settings=s)
             await client.sync_time()
             zeros = await client.verified_zero_fee_symbols(int(s.get("max_zero_fee_scan_symbols") or 80))
             await edit_query_as_panel(q, "🧾 API zero-fee symbols:\n" + (", ".join(zeros) if zeros else "Не нашёл API-подтверждённые zero-fee пары."), main_menu(), mode="api")
@@ -894,22 +974,22 @@ def main() -> None:
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN env is missing")
     app = ApplicationBuilder().token(token).post_init(post_init).post_shutdown(post_shutdown).build()
-    app.add_handler(CommandHandler("start", start_cmd))
-    app.add_handler(CommandHandler("menu", start_cmd))
-    app.add_handler(CommandHandler("ping", ping_cmd))
-    app.add_handler(CommandHandler("balance", balance_cmd))
-    app.add_handler(CommandHandler("status", status_cmd))
-    app.add_handler(CommandHandler("trades", trades_cmd))
-    app.add_handler(CommandHandler("log_full", log_full_cmd))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("panel", panel_cmd))
-    app.add_handler(CommandHandler("api", api_cmd))
-    app.add_handler(CommandHandler("set", set_cmd))
-    app.add_handler(CommandHandler("symbols", symbols_cmd))
-    app.add_handler(CommandHandler("ignore", ignore_cmd))
-    app.add_handler(CommandHandler("close_all", close_all_cmd))
-    app.add_handler(CommandHandler("closeall", close_all_cmd))
-    app.add_handler(CallbackQueryHandler(callback))
+    app.add_handler(CommandHandler("start", admin_guard(start_cmd)))
+    app.add_handler(CommandHandler("menu", admin_guard(start_cmd)))
+    app.add_handler(CommandHandler("ping", admin_guard(ping_cmd)))
+    app.add_handler(CommandHandler("balance", admin_guard(balance_cmd)))
+    app.add_handler(CommandHandler("status", admin_guard(status_cmd)))
+    app.add_handler(CommandHandler("trades", admin_guard(trades_cmd)))
+    app.add_handler(CommandHandler("log_full", admin_guard(log_full_cmd)))
+    app.add_handler(CommandHandler("help", admin_guard(help_cmd)))
+    app.add_handler(CommandHandler("panel", admin_guard(panel_cmd)))
+    app.add_handler(CommandHandler("api", admin_guard(api_cmd)))
+    app.add_handler(CommandHandler("set", admin_guard(set_cmd)))
+    app.add_handler(CommandHandler("symbols", admin_guard(symbols_cmd)))
+    app.add_handler(CommandHandler("ignore", admin_guard(ignore_cmd)))
+    app.add_handler(CommandHandler("close_all", admin_guard(close_all_cmd)))
+    app.add_handler(CommandHandler("closeall", admin_guard(close_all_cmd)))
+    app.add_handler(CallbackQueryHandler(admin_guard(callback)))
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 

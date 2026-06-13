@@ -1,43 +1,69 @@
-# MEXC Micro Maker LIVE Bot v0013
+# MEXC Micro Maker LIVE Bot v0015
 
 Отдельный Telegram-бот для live micro-maker / zero-fee scalping на MEXC futures.
 Старые режимы вырезаны. Из старого бота оставлен рабочий механизм MEXC API: подпись запросов, открытие/закрытие сделок, отмена ордеров, баланс, позиции, плечо, zero-fee/fee checks.
 
-## Что изменено в v0013
+## Что изменено в v0015
 
-- Проверен запуск в виртуальной среде: compile/import/dependency smoke-test.
-- Исправлен `/log_full clear`: лог теперь не теряется после очистки, handler пересоздаётся корректно.
-- `/log_full` теперь flush-ит handler перед экспортом, чтобы в `.txt` попали последние строки.
-- Сканер в WebSocket-режиме больше не делает массовый REST fallback по десяткам монет каждую секунду. Это защищает от REST-rate-limit и лагов.
-- Добавлен параметр `ws_scan_rest_fallback_limit`, по умолчанию `0`: быстрый скан читает локальный WS-кэш, REST остаётся для активной сделки/ручной диагностики.
-- WebSocket depth parser стал устойчивее к разным форматам строк стакана: list/tuple/dict.
-- Исправлена floating-point ошибка: настоящий spread 1 tick больше не отбрасывается как 0.999999999999 tick.
+- Для Coolify теперь нужны только 2 переменные окружения:
+  - `TELEGRAM_BOT_TOKEN`
+  - `ADMIN_IDS`
+- Все остальные значения выставлены внутри бота по умолчанию.
+- MEXC API задаётся только через Telegram: `/api set API_KEY API_SECRET`.
+- MEXC REST/WS endpoint, recv-window, private rate limit, public/private timeout и strict leverage теперь лежат в runtime settings и могут меняться через `/set`.
+- `.env.example` очищен: там оставлены только токен Telegram и admin id.
+- Версия везде обновлена на `v0015`.
 
-## Что было добавлено в v0012
+## Coolify ENV
 
-- Добавлена команда `/log_full`.
-- `/log_full` отправляет в Telegram файл `.txt` с полным debug-логом.
-- `/log_full clear` очищает текущий полный лог.
-- В лог пишутся:
-  - подробные ошибки с traceback;
-  - пересборка zero-fee universe каждые 60 секунд;
-  - список активных кандидатов и перебор монет;
-  - причины отсева монет: нет стакана, плохой spread, мало depth, нет imbalance, volume reject, региональные/unsupported/min-max ошибки;
-  - переключение монеты;
-  - расчёт размера позиции;
-  - подготовка входа;
-  - выставление post-only входа;
-  - отмена входа после lifetime;
-  - fill / not filled;
-  - сопровождение позиции;
-  - выставление close-limit;
-  - virtual stop / time stop;
-  - market close;
-  - Close All;
-  - MEXC private API request/response без раскрытия API secret/token/signature.
-- В `help` добавлена инструкция по `/log_full`.
-- Обычная Telegram-клавиатура обновлена: `/log_full` добавлен рядом с `/trades`.
-- Версия везде обновлена на `v0013`.
+В Coolify указывай только:
+
+```env
+TELEGRAM_BOT_TOKEN=твой_токен_от_BotFather
+ADMIN_IDS=твой_telegram_user_id
+```
+
+Больше ничего в Coolify добавлять не нужно.
+
+Встроенные дефолты уже выставлены так:
+
+```text
+MEXC REST: https://api.mexc.com
+MEXC WS: wss://contract.mexc.com/edge
+Recv window: 20000
+Private API rate limit: 18 requests / 2 sec
+Public timeout: 6 sec
+Private timeout: 15 sec
+Strict leverage: ON
+```
+
+Эти значения можно менять из Telegram:
+
+```text
+/set rest_base https://api.mexc.com
+/set ws_endpoint wss://contract.mexc.com/edge
+/set recv 20000
+/set rate 18
+/set public_timeout 6
+/set private_timeout 15
+/set strict_leverage on
+```
+
+## Первичная настройка
+
+1. Залей файлы в GitHub так, чтобы `Dockerfile` лежал в корне репозитория.
+2. В Coolify добавь только `TELEGRAM_BOT_TOKEN` и `ADMIN_IDS`.
+3. Запусти deploy.
+4. В Telegram отправь:
+
+```text
+/start
+/api set API_KEY API_SECRET
+/balance
+/log_full clear
+```
+
+5. Нажми `▶️ Start LIVE`.
 
 ## Главные кнопки Telegram
 
@@ -82,100 +108,47 @@ Inline-кнопки live-панели:
 /ignore             показать ignored symbols
 /ignore clear       очистить ignored symbols
 
-/set leverage 5     плечо 5x
-/set leverage 10    плечо 10x
-/set size 10        одна сделка 10% от total equity
+/close_all          остановить бота, отменить все ордера и закрыть все позиции market
+
+/set leverage 5     плечо
+/set size 10        одна сделка = 10% от TOTAL USDT equity
 /set positions 1    максимум открытых позиций
 /set symbols 1      сколько монет торговать одновременно
 /set tp 1           тейк в тиках
 /set sl 3           виртуальный стоп в тиках
-/set scan 1         быстрый автоскан раз в 1 секунду
-/set rescan 60      пересборка zero-fee universe каждые 60 секунд
-/set candidates 80  активное WS/scoring окно
+/set scan 1         интервал быстрого автоскана
+/set rescan 60      пересборка zero-fee universe каждые 60 сек
+/set candidates 80  сколько активных zero-fee монет держать в WS/scoring окне
+/set panel_sec 5    обычная частота live-сообщения
+/set panel_fast_sec 2 частота live-сообщения при открытой позиции
+/set panel_stopped_sec 0 не обновлять live-панель в STOPPED
 
-/close_all          остановить бота, снести ордера и закрыть все позиции market
-/closeall           то же самое
+/set rest_base https://api.mexc.com
+/set ws_endpoint wss://contract.mexc.com/edge
+/set recv 20000
+/set rate 18
+/set public_timeout 6
+/set private_timeout 15
+/set strict_leverage on
 ```
 
-## Логика по умолчанию
+## Поведение Stop / Close All
 
 ```text
-FULL AUTO: ON
-OnlyZeroFee: ON
-Zero-fee universe rescan: 60 sec
-Active WS candidates: 80
-Market data: WebSocket depth + REST fallback
-Position size: 10% of TOTAL USDT equity
-Leverage: 5x
-Max positions: 1
-Symbols limit: 1
-TP: 1 tick
-SL: 3 ticks
-Order lifetime: 700 ms
-Requote: 200 ms
+⏸ Stop
+- пауза торговли и фонового скана
+- новые сделки не открываются
+- позиции market принудительно не закрывает
+
+❌ Close All
+- останавливает бота
+- отменяет все активные/лимитные/plan/stop ордера
+- закрывает все позиции market
+- после этого чистит ордера ещё раз
 ```
 
-## Stop и Close All
+## Важное
 
-`⏸ Stop` — пауза торговли и скана:
-
-```text
-- новые сделки не открываются;
-- фоновый скан останавливается;
-- активные ордера отменяются;
-- позиции market не закрываются.
-```
-
-`❌ Close All` — полная очистка биржи:
-
-```text
-- торговля останавливается;
-- активные/лимитные/plan/stop ордера отменяются;
-- все открытые позиции закрываются market;
-- после закрытия ордера чистятся ещё раз.
-```
-
-## Full log
-
-Лог пишется в:
-
-```text
-logs/log_full.txt
-```
-
-Команда:
-
-```text
-/log_full
-```
-
-создаёт экспорт:
-
-```text
-logs/exports/mexc_micro_maker_log_full_YYYYMMDD_HHMMSS.txt
-```
-
-и отправляет этот `.txt` в Telegram.
-
-Секреты маскируются: API key, API secret, token, signature, password и похожие поля не выводятся полностью.
-
-## Запуск
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-# впиши TELEGRAM_BOT_TOKEN в .env
-python main.py
-```
-
-API-ключи MEXC задаются только через Telegram:
-
-```text
-/api set API_KEY API_SECRET
-```
-
-Telegram token остаётся только в `.env`.
-
-Важно: стопы/тейки виртуальные, их исполняет сам бот. Если процесс выключен, виртуальная защита не работает. Для полной очистки используй `❌ Close All` или `/close_all`.
+- Стопы и тейки виртуальные: их исполняет сам бот. Если процесс/сервер упал, виртуальная защита не работает.
+- Перед нормальной торговлей проверь `/balance`, `/log_full clear`, 1–2 сделки минимальным объёмом, потом `/close_all` и `/log_full`.
+- `ADMIN_IDS` лучше обязательно указать, чтобы чужие пользователи не могли управлять ботом.

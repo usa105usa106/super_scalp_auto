@@ -20,8 +20,9 @@ class MexcDepthWebSocket:
     to call REST depth on every tick.
     """
 
-    def __init__(self, endpoint: str | None = None):
-        self.endpoint = endpoint or os.getenv("MEXC_FUTURES_WS", "wss://contract.mexc.com/edge")
+    def __init__(self, endpoint: str | None = None, settings: dict[str, Any] | None = None):
+        self.settings: dict[str, Any] = dict(settings or {})
+        self.endpoint = endpoint or str(self.settings.get("mexc_futures_ws") or os.getenv("MEXC_FUTURES_WS", "wss://contract.mexc.com/edge"))
         self.desired_symbols: set[str] = set()
         self._subscribed: set[str] = set()
         self._books: dict[str, dict[str, Any]] = {}
@@ -33,6 +34,10 @@ class MexcDepthWebSocket:
         self.last_message_ts = 0.0
         self.last_connect_ts = 0.0
         self.reconnects = 0
+
+    def update_settings(self, settings: dict[str, Any] | None = None) -> None:
+        self.settings = dict(settings or {})
+        self.endpoint = str(self.settings.get("mexc_futures_ws") or os.getenv("MEXC_FUTURES_WS", "wss://contract.mexc.com/edge"))
 
     @staticmethod
     def _sid(symbol: str) -> str:

@@ -6,11 +6,21 @@ from pathlib import Path
 from typing import Any
 
 DEFAULTS: dict[str, Any] = {
-    "bot_version": "v0013",
+    "bot_version": "v0015",
 
     # secrets are set from Telegram with /api set KEY SECRET. Telegram token stays in ENV.
     "mexc_api_key": "",
     "mexc_api_secret": "",
+
+    # MEXC connection/runtime defaults. Coolify only needs TELEGRAM_BOT_TOKEN and ADMIN_IDS.
+    # These values are built in and can be changed from Telegram with /set.
+    "mexc_rest_base": "https://api.mexc.com",
+    "mexc_recv_window": 20000,
+    "mexc_private_rate_limit": 18,
+    "mexc_public_timeout": 6.0,
+    "mexc_private_timeout": 15.0,
+    "mexc_strict_leverage": True,
+    "mexc_futures_ws": "wss://contract.mexc.com/edge",
 
     # live trading core
     "live_enabled": False,
