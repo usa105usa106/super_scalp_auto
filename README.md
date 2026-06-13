@@ -1,35 +1,16 @@
-# MEXC Micro Maker v0032 Wave Hunter
+# MEXC Micro Maker v0030 Basket Truth
 
-Режим переделан из одиночной/рандомной корзины в Market Wave Basket:
+Fixes v0029 panel/counter lie:
+- Live panel now shows NET equity PnL = current USDT equity - start equity.
+- Closed trades PnL is shown separately and is not presented as account profit.
+- If a filled position proves actual non-zero fees via position fee/feeRates, bot aborts that invalid contract and ignores the symbol for the session.
+- USDT-only basket filter remains.
 
-- Бот сидит в засаде и постоянно сканирует USDT zero-fee universe.
-- Сделки не открываются по одной и не открываются случайно.
-- Если большинство лучших монет показывает общий LONG-импульс — бот открывает корзину LONG.
-- Если большинство лучших монет показывает общий SHORT-импульс — бот открывает корзину SHORT.
-- Для теста на ~12 USDT профиль ставит 5 позиций × 20% total equity, плечо 5x.
-- Входы в корзину делаются сразу в одном направлении, без схемы 3+2.
-- Основная цель — закрыть всю корзину по NET equity profit, а не ждать +$0.01 по каждой монете.
-- Панель показывает NET equity PnL как главную правду.
-- Если MEXC после входа показывает реальную комиссию/feeRates, позиция считается невалидной и корзина закрывается/монета игнорируется.
+Important: no-stop baskets can still hold losers indefinitely. NET equity PnL is the only truth.
 
-Default profile:
 
-```text
-trade_profile = wave_hunter_v0032
-wave_basket_enabled = true
-positions = 5
-position_margin_percent = 20
-leverage = 5
-wave_target_profit_usdt = 0.05
-wave_min_take_profit_usdt = 0.03
-wave_break_even_after_sec = 600
-wave_max_hold_sec = 900
-wave_entry_post_only = false
-wave_close_mode = market
-```
-
-Notes:
-
-- `wave_entry_post_only=false` нужен, чтобы не пропустить быстрый импульс. Вход — обычный limit на лучшую противоположную цену.
-- Закрытие корзины по умолчанию market, потому что цель режима — быстро забрать общий NET+ до затухания импульса.
-- Если при старте уже есть открытые позиции, бот не откроет новую wave-корзину поверх них. Сначала нужно закрыть старые позиции или дождаться их менеджера.
+## v0033 Wave Hunter Safe
+- Подтверждение импульса через лидеров BTC/SOL/ETH.
+- Входы корзины запускаются параллельно, не 3+2 и не по одному с большой задержкой.
+- Контракты с фактической комиссией больше не закрываются мгновенно только из-за fee; цель корзины автоматически поднимается, чтобы покрыть entry/exit fee + чистый буфер.
+- Исправлен scan_symbol_error duplicate bid/ask.

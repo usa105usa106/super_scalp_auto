@@ -109,7 +109,7 @@ class MicroMakerEngine:
         # indexes and tokenized tickers without this substring remain allowed.
         if "STOCK" in sym:
             return True
-        # v0032: the account balance/margin shown by MEXC is USDT. Contracts like
+        # v0033: the account balance/margin shown by MEXC is USDT. Contracts like
         # SOL_USDC/BTC_USDC require USDC collateral, so MEXC returns
         # "Balance insufficient" with available=0 even when USDT is free.
         # Basket mode must therefore trade only *_USDT contracts by default.
@@ -533,7 +533,7 @@ class MicroMakerEngine:
             self._log_error("start_balance_error", e)
         self.task = asyncio.create_task(self._run_loop(), name="micro_maker_loop")
         self._log_event("start_success", start_equity=self.stats.start_equity)
-        return "▶️ Micro Maker LIVE v0032 запущен. Wave Hunter: засада, общий LONG/SHORT импульс, затем 5 позиций по 20%, закрытие всей корзины по NET+."
+        return "▶️ Micro Maker LIVE v0033 запущен. Wave Hunter Safe: засада, общий LONG/SHORT импульс, затем 5 позиций по 20%, закрытие всей корзины по NET+."
 
     async def stop(self, close_positions: bool = False) -> str:
         self._log_event("stop_requested", close_positions=close_positions, active_tasks=list(self.active_tasks.keys()))
@@ -627,7 +627,7 @@ class MicroMakerEngine:
         cooldown_left = max(0.0, self.cooldown_until_ts - time.time())
         cooldown_txt = f" | Cooldown: {cooldown_left:.0f}s" if cooldown_left > 0 else ""
         return (
-            f"🤖 MEXC Micro Maker LIVE {s.get('bot_version', 'v0032')}\n"
+            f"🤖 MEXC Micro Maker LIVE {s.get('bot_version', 'v0033')}\n"
             f"State: {state} | Updated: {last_update}{cooldown_txt}\n"
             f"Uptime: {h:02d}:{m:02d}:{sec:02d}\n\n"
             f"⚙️ {s.get('leverage')}x | Size: {s.get('position_margin_percent', 10)}% total | "
@@ -689,7 +689,7 @@ class MicroMakerEngine:
             "📊 Micro Maker Status\n\n"
             f"State: {'RUNNING' if self.is_running() else 'STOPPED'}\n"
             f"Active tasks: {len(self.active_tasks)} | Current: {', '.join(self.stats.current_symbols) or '-'}\n"
-            f"Version: {s.get('bot_version', 'v0032')}\n"
+            f"Version: {s.get('bot_version', 'v0033')}\n"
             f"Leverage: {s.get('leverage')}x | One trade size: {s.get('position_margin_percent', 10)}% of TOTAL USDT equity\n"
             f"Max positions: {s.get('max_positions')} | Symbols limit: {s.get('symbols_limit')}\n"
             f"Scanner: {'AUTO' if s.get('auto_select_symbols') else 'MANUAL'} | ZeroFee: {'ON' if s.get('only_zero_fee') else 'OFF'} | scan age: {age:.1f}s | rescan: {s.get('zero_fee_rescan_sec')}s\n"
@@ -751,7 +751,7 @@ class MicroMakerEngine:
 
     async def _run_loop(self) -> None:
         self._log_event("run_loop_started")
-        await self._notify("✅ LIVE loop v0032 started. Wave Hunter: ждём общий импульс рынка, затем открываем 5 LONG или 5 SHORT разом и закрываем корзину по NET+.")
+        await self._notify("✅ LIVE loop v0033 started. Wave Hunter Safe: ждём общий импульс рынка, затем открываем 5 LONG или 5 SHORT разом и закрываем корзину по NET+.")
         while self.running:
             try:
                 s = self._settings()
@@ -978,6 +978,10 @@ class MicroMakerEngine:
                 if not bias:
                     try:
                         em = await self._edge_metrics(sym, s, book)
+                        # v0033: avoid TypeError from duplicate bid/ask/depth keys
+                        # when edge metrics are merged into scan detail.
+                        for _k in ("bid", "ask", "spread_ticks", "depth_bid", "depth_ask", "depth_min", "imbalance", "source"):
+                            em.pop(_k, None)
                     except Exception:
                         em = {}
                     add_scan_detail(sym, "reject", "edge", bid=bid, ask=ask, spread_ticks=spread_ticks, depth_bid=depth_b, depth_ask=depth_a, depth_min=depth_min, imbalance=imbalance, source=book.get("source"), **em)
@@ -1152,6 +1156,32 @@ class MicroMakerEngine:
             return None, age
         return (float(cur[1]) - float(old[1])) / max(float(tick), 1e-12), age
 
+    def _wave_leader_counts(self, s: dict[str, Any]) -> dict[str, Any]:
+        """Fast market-direction check using leaders, not trade candidates.
+
+        Candidate rows can be noisy or unavailable because of min-margin/depth filters.
+        Leaders are used only for direction confirmation so the bot does not fire a
+        five-coin basket on one noisy altcoin pulse.
+        """
+        raw = str(s.get("wave_leader_symbols") or "BTC_USDT,SOL_USDT,ETH_USDT")
+        leaders = [MexcFuturesClient.contract_id(x.strip()) for x in raw.split(",") if x.strip()]
+        lookback = float(s.get("wave_lookback_sec") or 20.0)
+        min_move = float(s.get("wave_leader_min_move_ticks") or s.get("wave_min_move_ticks") or 3.0)
+        out: dict[str, Any] = {"leaders": leaders, "long": 0, "short": 0, "moves": {}}
+        for sym in leaders:
+            arr = self.mid_history.get(sym) or []
+            tick = float(arr[-1][2]) if arr else 0.0
+            mv, age = self._recent_move_ticks(sym, lookback, tick)
+            if mv is None:
+                out["moves"][sym] = {"move_ticks": None, "age": age}
+                continue
+            out["moves"][sym] = {"move_ticks": mv, "age": age}
+            if mv >= min_move:
+                out["long"] += 1
+            elif mv <= -min_move:
+                out["short"] += 1
+        return out
+
     async def _edge_metrics(self, symbol: str, s: dict[str, Any], book: dict[str, Any]) -> dict[str, Any]:
         """Cheap live edge metrics from the current book.
 
@@ -1193,7 +1223,7 @@ class MicroMakerEngine:
         else:
             forced = None
 
-        # v0032 Wave Hunter: trend-following basket entries.
+        # v0033 Wave Hunter Safe: trend-following basket entries.
         # A single coin is allowed only when its recent move supports the global wave side.
         # The run loop opens the whole basket only after enough coins point to the same side.
         if bool(s.get("wave_basket_enabled", False)):
@@ -1206,8 +1236,9 @@ class MicroMakerEngine:
                     self._log_debug("wave_wait_history", symbol=symbol, sample_age=sample_age, lookback=lookback)
                     return None
                 depth_ratio = float(s.get("min_imbalance_ratio") or 1.03)
-                top_ratio = float(s.get("wave_entry_top_ratio") or 1.02)
+                top_ratio = float(s.get("wave_entry_top_ratio") or 1.05)
                 micro_min = float(s.get("wave_entry_micro_ticks") or 0.0)
+                quality_need = max(1, int(s.get("wave_quality_score_required") or 2))
                 db = float(m0.get("depth_bid") or 0.0)
                 da = float(m0.get("depth_ask") or 0.0)
                 bt = float(m0.get("bid_top") or 0.0)
@@ -1215,8 +1246,8 @@ class MicroMakerEngine:
                 micro = float(m0.get("micro_ticks") or 0.0)
                 long_score = int(db >= da * depth_ratio) + int(bt >= at * top_ratio) + int(micro >= micro_min)
                 short_score = int(da >= db * depth_ratio) + int(at >= bt * top_ratio) + int(micro <= -micro_min)
-                long_ok = move_ticks >= min_move and long_score >= 1
-                short_ok = move_ticks <= -min_move and short_score >= 1
+                long_ok = move_ticks >= min_move and long_score >= quality_need
+                short_ok = move_ticks <= -min_move and short_score >= quality_need
                 if forced == "long":
                     return "long" if long_ok else None
                 if forced == "short":
@@ -1233,7 +1264,7 @@ class MicroMakerEngine:
                 self._log_error("wave_direction_error", e, symbol=symbol)
                 return None
 
-        # v0032 Wave Hunter: no random entries. Enter only after a short
+        # v0033 Wave Hunter Safe: no random entries. Enter only after a short
         # impulse and only in the rebound direction, confirmed by top-book support
         # and microprice. This keeps the 3-position basket idea, but avoids opening
         # positions that can sit underwater for hours after trend-following fills.
@@ -1348,7 +1379,7 @@ class MicroMakerEngine:
     def _detect_wave_signal(self, rows: list[dict[str, Any]], s: dict[str, Any]) -> tuple[str | None, list[dict[str, Any]], dict[str, Any]]:
         """Return a market-wide wave side and the best rows for that side.
 
-        This is the v0032 ambush: do not open one-by-one. Wait until enough
+        This is the v0033 ambush: do not open one-by-one. Wait until enough
         candidates in the scanned universe point to the same LONG/SHORT impulse,
         then fire the basket immediately.
         """
@@ -1392,6 +1423,21 @@ class MicroMakerEngine:
         if self.wave_candidate_count < confirm_need:
             details["reason"] = "confirming"
             return None, [], details
+
+        if bool(s.get("wave_require_leader_confirmation", True)):
+            leaders = self._wave_leader_counts(s)
+            details["leaders"] = leaders
+            min_leaders = max(0, int(s.get("wave_min_leader_confirm") or 1))
+            max_opp = max(0, int(s.get("wave_max_opposite_leaders") or 0))
+            if side == "long":
+                if int(leaders.get("long") or 0) < min_leaders or int(leaders.get("short") or 0) > max_opp:
+                    details["reason"] = "leader_not_confirmed"
+                    return None, [], details
+            else:
+                if int(leaders.get("short") or 0) < min_leaders or int(leaders.get("long") or 0) > max_opp:
+                    details["reason"] = "leader_not_confirmed"
+                    return None, [], details
+
         # Prefer best-scored coins, but also require the same side.
         picked = sorted(side_rows, key=lambda r: float(r.get("score") or 0.0), reverse=True)[:need]
         return side, picked, details
@@ -1579,23 +1625,53 @@ class MicroMakerEngine:
         opened: list[dict[str, Any]] = []
         started = time.time()
         self._log_event("wave_cycle_start", side=side, symbols=symbols, target=target, equity_before=equity_before)
-        for sym in symbols:
-            if not self.running:
-                break
-            if len(opened) >= int(s.get("wave_positions") or 5):
-                break
-            pos = await self._open_wave_position(sym, side, s, equity_before)
-            if pos:
-                opened.append(pos)
-                self.stats.current_symbols = [p.get("symbol") for p in opened] + [x for x in symbols if x not in [p.get("symbol") for p in opened]][: max(0, int(s.get("wave_positions") or 5)-len(opened))]
-            # Minimal pause: not a delayed 3+2 mode, just protects the private API.
-            await asyncio.sleep(0.04)
+        wave_slots = int(s.get("wave_positions") or 5)
+        order_symbols = symbols[:wave_slots]
+        if bool(s.get("wave_parallel_open", True)):
+            # v0033: fire the basket together. v0032 opened sequentially and waited
+            # after every symbol; by the last symbol the impulse could already be gone.
+            tasks = [asyncio.create_task(self._open_wave_position(sym, side, s, equity_before), name=f"wave_open_{sym}") for sym in order_symbols]
+            for task in asyncio.as_completed(tasks):
+                if not self.running:
+                    break
+                try:
+                    pos = await task
+                except Exception as e:
+                    self._log_error("wave_parallel_open_error", e)
+                    pos = None
+                if pos:
+                    opened.append(pos)
+                    self.stats.current_symbols = [p.get("symbol") for p in opened] + [x for x in order_symbols if x not in [p.get("symbol") for p in opened]][: max(0, wave_slots-len(opened))]
+        else:
+            for sym in order_symbols:
+                if not self.running:
+                    break
+                if len(opened) >= wave_slots:
+                    break
+                pos = await self._open_wave_position(sym, side, s, equity_before)
+                if pos:
+                    opened.append(pos)
+                    self.stats.current_symbols = [p.get("symbol") for p in opened] + [x for x in order_symbols if x not in [p.get("symbol") for p in opened]][: max(0, wave_slots-len(opened))]
+                await asyncio.sleep(0.04)
         if not opened:
             self.stats.last_action = "wave fired but no entries filled"
             self._log_event("wave_cycle_no_fills", side=side, symbols=symbols)
             return
         if len(opened) < min_filled:
             self._log_event("wave_cycle_underfilled", filled=len(opened), min_filled=min_filled, symbols=[p.get("symbol") for p in opened])
+
+        # v0033: if MEXC charged real fees despite the zero-fee universe, do not
+        # instantly kill the position. Instead raise the basket NET target so the
+        # cycle only closes after fees + a real profit buffer are covered.
+        entry_fee_sum = sum(self._position_fee_usdt(p) for p in opened)
+        if entry_fee_sum > 0:
+            fee_mult = max(1.0, float(s.get("wave_fee_target_multiplier") or 2.4))
+            fee_buffer = max(0.0, float(s.get("wave_fee_profit_buffer_usdt") or target))
+            fee_target = entry_fee_sum * fee_mult + fee_buffer
+            old_target = target
+            target = max(target, fee_target)
+            min_take = max(min_take, target * 0.60)
+            self._log_event("wave_fee_adjusted_target", entry_fee_sum=entry_fee_sum, old_target=old_target, target=target, min_take=min_take, opened=[p.get("symbol") for p in opened])
         await self._notify(f"✅ WAVE {side.upper()} FILLED: {', '.join([p.get('symbol') for p in opened])}. Жду NET +${target:.3f}.")
         peak_net = -999.0
         reason = "running"
@@ -1829,7 +1905,7 @@ class MicroMakerEngine:
         await self._manage_position(symbol, direction, pos, s, equity_before=equity_before)
 
     async def _manage_basket_position(self, symbol: str, direction: str, pos: dict[str, Any], s: dict[str, Any], equity_before: float | None = None) -> None:
-        """v0032 Wave Hunter manager.
+        """v0033 Wave Hunter Safe manager.
 
         No per-position stop. A position is closed only with a maker close order
         when the configured positive basket target is reachable. After the task
@@ -1901,7 +1977,7 @@ class MicroMakerEngine:
             active_target_ticks = max(1, int(math.ceil(active_target_usdt / max(tick_value, 1e-12))))
             target_price = entry + active_target_ticks * tick if direction == "long" else entry - active_target_ticks * tick
 
-            # v0032 rotation: after the stale timeout, stop waiting for +$0.01.
+            # v0033 rotation: after the stale timeout, stop waiting for +$0.01.
             # The close order is downgraded to breakeven/small-profit so the slot can
             # rotate into a better coin. This is not a stop; it does not cross a loss.
             if direction == "long":
