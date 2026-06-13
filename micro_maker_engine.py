@@ -20,6 +20,10 @@ Notify = Callable[[str], Awaitable[None]]
 class EngineStats:
     started_ts: float = 0.0
     start_equity: float = 0.0
+    live_equity: float = 0.0
+    live_unrealized: float = 0.0
+    live_used_margin: float = 0.0
+    net_equity_pnl: float = 0.0
     estimated_pnl: float = 0.0
     trades: int = 0
     wins: int = 0
@@ -58,6 +62,10 @@ class MicroMakerEngine:
         self._last_logged_scan_ts = 0.0
         self.cooldown_until_ts = 0.0
         self.last_trade_closed_ts = 0.0
+        self.mid_history: dict[str, list[tuple[float, float, float]]] = {}
+        self.wave_candidate_side: str | None = None
+        self.wave_candidate_count: int = 0
+        self.wave_cooldown_until_ts: float = 0.0
         log_event("engine_init", version=self._settings().get("bot_version"))
 
     def _log_event(self, event: str, **data: Any) -> None:
@@ -101,7 +109,7 @@ class MicroMakerEngine:
         # indexes and tokenized tickers without this substring remain allowed.
         if "STOCK" in sym:
             return True
-        # v0029: the account balance/margin shown by MEXC is USDT. Contracts like
+        # v0032: the account balance/margin shown by MEXC is USDT. Contracts like
         # SOL_USDC/BTC_USDC require USDC collateral, so MEXC returns
         # "Balance insufficient" with available=0 even when USDT is free.
         # Basket mode must therefore trade only *_USDT contracts by default.
@@ -200,6 +208,97 @@ class MicroMakerEngine:
             except Exception:
                 pass
         return 0.0
+
+    @staticmethod
+    def _position_has_nonzero_fee(pos: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        """Return True if the already-open live position proves this contract is not fee-free.
+
+        MEXC zero-fee lists/fee endpoints may disagree with the actual position.
+        The position object is the final truth: if fee/totalFee or feeRates are non-zero,
+        a 1-cent basket harvest must not keep this contract for hours.
+        """
+        raw = pos.get("raw") if isinstance(pos, dict) else {}
+        if not isinstance(raw, dict):
+            raw = {}
+        info: dict[str, Any] = {"fee": 0.0, "totalFee": 0.0, "holdFee": 0.0, "minRate": 0.0, "maxRate": 0.0}
+        for key in ("fee", "totalFee", "holdFee"):
+            try:
+                info[key] = abs(float(raw.get(key) or 0.0))
+            except Exception:
+                info[key] = 0.0
+        rates = raw.get("feeRates") if isinstance(raw.get("feeRates"), dict) else {}
+        try:
+            info["minRate"] = abs(float(rates.get("min") or 0.0))
+        except Exception:
+            pass
+        try:
+            info["maxRate"] = abs(float(rates.get("max") or 0.0))
+        except Exception:
+            pass
+        bad = any(float(info.get(k) or 0.0) > 1e-12 for k in ("fee", "totalFee", "holdFee", "minRate", "maxRate"))
+        return bad, info
+
+    async def _refresh_equity_snapshot(self, client: MexcFuturesClient | None = None) -> None:
+        """Update live account equity snapshot used by the fast Telegram panel."""
+        c = client or self.client
+        if not c:
+            return
+        try:
+            bal = await c.fetch_balance()
+            usdt = bal.get("USDT") or {}
+            equity = float(usdt.get("total") or 0.0)
+            self.stats.live_equity = equity
+            self.stats.live_unrealized = float(usdt.get("unrealized") or 0.0)
+            self.stats.live_used_margin = float(usdt.get("used") or 0.0)
+            self.stats.net_equity_pnl = (equity - float(self.stats.start_equity or 0.0)) if self.stats.start_equity else 0.0
+        except Exception as e:
+            self._log_error("equity_snapshot_error", e)
+
+    async def _abort_invalid_fee_position(self, client: MexcFuturesClient, symbol: str, direction: str, pos: dict[str, Any], s: dict[str, Any], equity_before: float | None, reason_info: dict[str, Any]) -> bool:
+        """Immediately exit positions that prove they are not zero-fee after fill.
+
+        This is not a strategy stop; it is an invalid-contract abort. Holding such
+        positions makes the panel look green on closed trades while account equity bleeds.
+        """
+        if not bool(s.get("abort_nonzero_fee_position", True)):
+            return False
+        leverage = int(s.get("leverage") or 5)
+        open_type = int(s.get("open_type") or 1)
+        self.stats.last_action = f"{symbol}: invalid fee after fill, aborting"
+        self._log_event("invalid_fee_position_abort_start", symbol=symbol, direction=direction, fee_info=reason_info, position=pos)
+        try:
+            if bool(s.get("emergency_market_close_invalid_fee", True)):
+                order = await client.close_market(pos, leverage=leverage, open_type=open_type)
+            else:
+                book = await self._depth(symbol, limit=5)
+                if book.get("bids") and book.get("asks"):
+                    px = book["bids"][0][0] if direction == "long" else book["asks"][0][0]
+                else:
+                    px = float(pos.get("entryPrice") or 0.0)
+                order = await client.close_limit(symbol, direction, int(round(float(pos.get("contracts") or 0))), px, leverage, open_type, post_only=False)
+            self._log_event("invalid_fee_position_abort_order", symbol=symbol, direction=direction, order=order)
+            for _ in range(10):
+                await asyncio.sleep(0.35)
+                if not await client.find_position(symbol, direction):
+                    break
+        except Exception as e:
+            self._log_error("invalid_fee_position_abort_error", e, symbol=symbol, direction=direction, fee_info=reason_info)
+            return False
+        equity_after = await self._read_usdt_total(client) if bool(s.get("real_pnl_enabled", True)) else None
+        pnl = 0.0
+        if equity_before is not None and equity_after is not None:
+            pnl = float(equity_after) - float(equity_before)
+        self.stats.estimated_pnl += pnl
+        self.stats.trades += 1
+        self.stats.losses += 1
+        self.stats.consecutive_losses += 1
+        self._increment_total_trade_counters(pnl, is_win=False)
+        self.last_trade_closed_ts = time.time()
+        self._ignore_symbol(symbol, f"actual position fee not zero: {reason_info}")
+        await self._refresh_equity_snapshot(client)
+        self._log_event("invalid_fee_position_aborted", symbol=symbol, direction=direction, pnl=pnl, equity_before=equity_before, equity_after=equity_after, fee_info=reason_info)
+        await self._notify(f"⛔ {symbol} aborted: actual fee not zero, pnl={pnl:.6f} USDT")
+        return True
 
     async def _fee_aware_target_ticks(self, symbol: str, contracts: int, tick: float, base_target_ticks: int, pos: dict[str, Any], s: dict[str, Any], client: MexcFuturesClient) -> tuple[int, dict[str, Any]]:
         """Lift target ticks if real MEXC fees make 1 tick unprofitable."""
@@ -432,13 +531,9 @@ class MicroMakerEngine:
         except Exception as e:
             self.stats.last_error = f"balance: {e}"
             self._log_error("start_balance_error", e)
-        try:
-            await self._adopt_existing_positions(self._settings())
-        except Exception as e:
-            self._log_error("start_adopt_positions_error", e)
         self.task = asyncio.create_task(self._run_loop(), name="micro_maker_loop")
         self._log_event("start_success", start_equity=self.stats.start_equity)
-        return "▶️ Micro Maker LIVE v0029 запущен. Basket Harvest: 3 позиции по 10%, стопов нет, закрытие только по +$0.01."
+        return "▶️ Micro Maker LIVE v0032 запущен. Wave Hunter: засада, общий LONG/SHORT импульс, затем 5 позиций по 20%, закрытие всей корзины по NET+."
 
     async def stop(self, close_positions: bool = False) -> str:
         self._log_event("stop_requested", close_positions=close_positions, active_tasks=list(self.active_tasks.keys()))
@@ -532,22 +627,25 @@ class MicroMakerEngine:
         cooldown_left = max(0.0, self.cooldown_until_ts - time.time())
         cooldown_txt = f" | Cooldown: {cooldown_left:.0f}s" if cooldown_left > 0 else ""
         return (
-            f"🤖 MEXC Micro Maker LIVE {s.get('bot_version', 'v0029')}\n"
+            f"🤖 MEXC Micro Maker LIVE {s.get('bot_version', 'v0032')}\n"
             f"State: {state} | Updated: {last_update}{cooldown_txt}\n"
             f"Uptime: {h:02d}:{m:02d}:{sec:02d}\n\n"
             f"⚙️ {s.get('leverage')}x | Size: {s.get('position_margin_percent', 10)}% total | "
             f"Pos: {s.get('max_positions')} | Symbols: {s.get('symbols_limit')}\n" +
-            (f"🎯 Basket: {s.get('basket_positions', s.get('max_positions'))} pos × {s.get('position_margin_percent', 10)}% | Target: +${float(s.get('basket_target_profit_usdt') or 0.01):.3f} | Stop: OFF | "
-             if bool(s.get('basket_harvest_enabled')) else
-             f"🎯 TP/SL: {s.get('target_ticks')}/{s.get('stop_ticks')} ticks | ")
+            (f"🎯 Wave: {s.get('wave_positions', s.get('max_positions'))} pos × {s.get('position_margin_percent', 20)}% | Basket NET TP +${float(s.get('wave_target_profit_usdt') or 0.05):.3f} | BE {float(s.get('wave_break_even_after_sec') or 0)/60:.0f}m | Stop: OFF | "
+             if bool(s.get('wave_basket_enabled')) else
+             (f"🎯 Basket: {s.get('basket_positions', s.get('max_positions'))} pos × {s.get('position_margin_percent', 10)}% | TP +${float(s.get('basket_target_profit_usdt') or 0.01):.3f} | BE {float(s.get('basket_break_even_after_sec') or 0)/60:.0f}m | Stop: OFF | "
+              if bool(s.get('basket_harvest_enabled')) else
+              f"🎯 TP/SL: {s.get('target_ticks')}/{s.get('stop_ticks')} ticks | "))
             + f"Emergency: {'ON' if s.get('emergency_market_close') else 'OFF'} | Profile: {s.get('trade_profile', '-')}\n"
             f"🔎 Scanner: {'AUTO' if s.get('auto_select_symbols') else 'MANUAL'} | "
             f"ZeroFee: {'ON' if s.get('only_zero_fee') else 'OFF'} | age {age:.1f}s | rescan {s.get('zero_fee_rescan_sec')}s\n"
             f"🌐 Universe: {self.stats.zero_fee_universe_count or len(self.zero_fee_cache)} zero-fee | "
             f"active {s.get('max_zero_fee_scan_symbols')} | ignored {self.stats.ignored_symbols_count or len(self._ignored_symbols(s))}\n"
             f"⚡ Market data: {self._market_data_status()}\n"
-            f"📌 Current: {current} | Open: {opened}\n\n"
-            f"📈 Session: {self.stats.trades} trades | + / -: {self.stats.wins}/{self.stats.losses} | "
+            f"📌 Current: {current} | Open: {opened}\n"
+            f"💰 NET equity PnL: {self.stats.net_equity_pnl:.5f} USDT | Equity: {self.stats.live_equity:.4f} | Unrl: {self.stats.live_unrealized:.5f}\n\n"
+            f"📈 Closed session: {self.stats.trades} cycles | + / -: {self.stats.wins}/{self.stats.losses} | "
             f"Real/Approx PnL: {self.stats.estimated_pnl:.5f} USDT\n"
             f"📒 Total: {total_trades} trades | + / -: {total_wins}/{total_losses} | "
             f"Real/Approx PnL: {total_pnl:.5f} USDT\n"
@@ -591,17 +689,20 @@ class MicroMakerEngine:
             "📊 Micro Maker Status\n\n"
             f"State: {'RUNNING' if self.is_running() else 'STOPPED'}\n"
             f"Active tasks: {len(self.active_tasks)} | Current: {', '.join(self.stats.current_symbols) or '-'}\n"
-            f"Version: {s.get('bot_version', 'v0029')}\n"
+            f"Version: {s.get('bot_version', 'v0032')}\n"
             f"Leverage: {s.get('leverage')}x | One trade size: {s.get('position_margin_percent', 10)}% of TOTAL USDT equity\n"
             f"Max positions: {s.get('max_positions')} | Symbols limit: {s.get('symbols_limit')}\n"
             f"Scanner: {'AUTO' if s.get('auto_select_symbols') else 'MANUAL'} | ZeroFee: {'ON' if s.get('only_zero_fee') else 'OFF'} | scan age: {age:.1f}s | rescan: {s.get('zero_fee_rescan_sec')}s\n"
             f"Zero-fee universe: {self.stats.zero_fee_universe_count or len(self.zero_fee_cache)} | active candidates: {s.get('max_zero_fee_scan_symbols')} | ignored: {self.stats.ignored_symbols_count or len(self._ignored_symbols(s))}\n"
             f"Market data: {self._market_data_status()} | mode={s.get('market_data_mode')}\n" +
-            (f"Basket target: +${float(s.get('basket_target_profit_usdt') or 0.01):.3f} | Stop: OFF | Emergency: {'ON' if s.get('emergency_market_close') else 'OFF'}\n"
-             if bool(s.get('basket_harvest_enabled')) else
-             f"Target/Stop: {s.get('target_ticks')}/{s.get('stop_ticks')} ticks | Emergency: {'ON' if s.get('emergency_market_close') else 'OFF'}\n") +
+            (f"Wave target: +${float(s.get('wave_target_profit_usdt') or 0.05):.3f} NET | positions={s.get('wave_positions')} | BE after: {float(s.get('wave_break_even_after_sec') or 0)/60:.0f}m | Stop: OFF | Emergency: {'ON' if s.get('emergency_market_close') else 'OFF'}\n"
+             if bool(s.get('wave_basket_enabled')) else
+             (f"Basket target: +${float(s.get('basket_target_profit_usdt') or 0.01):.3f} | BE after: {float(s.get('basket_break_even_after_sec') or 0)/60:.0f}m | Stop: OFF | Emergency: {'ON' if s.get('emergency_market_close') else 'OFF'}\n"
+              if bool(s.get('basket_harvest_enabled')) else
+              f"Target/Stop: {s.get('target_ticks')}/{s.get('stop_ticks')} ticks | Emergency: {'ON' if s.get('emergency_market_close') else 'OFF'}\n")) +
             f"Session trades: {self.stats.trades} | + / -: {self.stats.wins}/{self.stats.losses} | Real/Approx PnL: {self.stats.estimated_pnl:.5f} USDT\n"
-            f"Total trades: {total_trades} | + / -: {total_wins}/{total_losses} | Total Real/Real/Approx PnL: {total_pnl:.5f} USDT\n"
+            f"Total trades: {total_trades} | + / -: {total_wins}/{total_losses} | Total Closed PnL: {total_pnl:.5f} USDT\n"
+            f"NET equity PnL: {self.stats.net_equity_pnl:.5f} USDT | Equity: {self.stats.live_equity:.4f} | Unrealized: {self.stats.live_unrealized:.5f}\n"
             f"Consecutive losses: {self.stats.consecutive_losses} | API errors: {self.stats.api_errors}\n"
             f"Last: {self.stats.last_action}\n"
             f"Error: {self.stats.last_error or '-'}\n\n"
@@ -637,7 +738,8 @@ class MicroMakerEngine:
         for i, r in enumerate(rows, 1):
             lines.append(
                 f"{i}. {r['symbol']} score={r['score']:.1f} side={r['bias']} "
-                f"spr={r['spread_ticks']:.1f}t depth={r['depth_min']:.0f}$ imb={r['imbalance']:.2f} src={r.get('source','-')}"
+                f"spr={r['spread_ticks']:.1f}t depth={r['depth_min']:.0f}$ imb={r['imbalance']:.2f} "
+                f"move={float(r.get('move_ticks') or 0.0):+.1f}t src={r.get('source','-')}"
             )
         return "\n".join(lines)
 
@@ -647,68 +749,32 @@ class MicroMakerEngine:
             return "-"
         return ", ".join(f"{k}={v}" for k, v in sorted(counts.items(), key=lambda kv: (-int(kv[1]), str(kv[0])))[:5])
 
-    async def _adopt_existing_positions(self, s: dict[str, Any]) -> None:
-        """Attach basket managers to positions that already exist after redeploy.
-
-        Without this, a redeploy can leave old ONDO/BTC positions unmanaged and
-        the bot may open extra slots on top of them. v0029 adopts only *_USDT
-        positions because basket mode is USDT-collateral only.
-        """
-        if not bool(s.get("basket_harvest_enabled", False)):
-            return
-        client = await self._ensure_client()
-        try:
-            positions = await client.fetch_positions()
-        except Exception as e:
-            self._log_error("adopt_positions_fetch_error", e)
-            return
-        target_slots = min(int(s.get("max_positions") or 1), int(s.get("symbols_limit") or 1))
-        equity_now = await self._read_usdt_total(client) if bool(s.get("real_pnl_enabled", True)) else None
-        adopted = []
-        for pos in positions:
-            sym = MexcFuturesClient.contract_id(pos.get("symbol"))
-            if not sym or self._blocked_symbol(sym):
-                continue
-            if sym in self.active_tasks:
-                continue
-            if len(self.active_tasks) >= target_slots:
-                break
-            side = str(pos.get("side") or "").lower()
-            if side not in {"long", "short"}:
-                continue
-            if sym not in self.stats.open_position_symbols:
-                self.stats.open_position_symbols.append(sym)
-            task = asyncio.create_task(self._manage_position(sym, side, pos, s, equity_before=equity_now), name=f"adopt_{sym}")
-            self.active_tasks[sym] = task
-            adopted.append({"symbol": sym, "side": side, "contracts": pos.get("contracts"), "entry": pos.get("entryPrice")})
-        if adopted:
-            self.stats.current_symbols = list(self.active_tasks.keys())[:target_slots]
-            self._log_event("adopt_existing_positions", adopted=adopted, target_slots=target_slots)
-            await self._notify("♻️ Adopted existing positions: " + ", ".join(x["symbol"] for x in adopted))
-
     async def _run_loop(self) -> None:
         self._log_event("run_loop_started")
-        await self._notify("✅ LIVE loop v0029 started. Basket Harvest активен: 3 позиции по 10%, стопов нет, закрытие только по +$0.01.")
+        await self._notify("✅ LIVE loop v0032 started. Wave Hunter: ждём общий импульс рынка, затем открываем 5 LONG или 5 SHORT разом и закрываем корзину по NET+.")
         while self.running:
             try:
                 s = self._settings()
                 await self._risk_guard(s)
                 await self._cleanup_tasks()
-                # Background scan runs even when all slots are busy. A better coin will be used as soon as capacity frees.
-                await self._refresh_market_scan(s, force=False)
-                active_symbols = set(self.active_tasks.keys()) | set(self.stats.open_position_symbols)
-                target_slots = min(int(s.get("max_positions") or 1), int(s.get("symbols_limit") or 1))
-                capacity = max(0, target_slots - len(active_symbols))
-                if capacity > 0:
-                    symbols = await self._select_symbols(s, capacity=capacity)
-                    for sym in symbols:
-                        if capacity <= 0:
-                            break
-                        if sym in self.active_tasks:
-                            continue
-                        task = asyncio.create_task(self._trade_cycle(sym), name=f"trade_{sym}")
-                        self.active_tasks[sym] = task
-                        capacity -= 1
+                if bool(s.get("wave_basket_enabled", False)):
+                    await self._wave_loop_tick(s)
+                else:
+                    # Background scan runs even when all slots are busy. A better coin will be used as soon as capacity frees.
+                    await self._refresh_market_scan(s, force=False)
+                    active_symbols = set(self.active_tasks.keys()) | set(self.stats.open_position_symbols)
+                    target_slots = min(int(s.get("max_positions") or 1), int(s.get("symbols_limit") or 1))
+                    capacity = max(0, target_slots - len(active_symbols))
+                    if capacity > 0:
+                        symbols = await self._select_symbols(s, capacity=capacity)
+                        for sym in symbols:
+                            if capacity <= 0:
+                                break
+                            if sym in self.active_tasks:
+                                continue
+                            task = asyncio.create_task(self._trade_cycle(sym), name=f"trade_{sym}")
+                            self.active_tasks[sym] = task
+                            capacity -= 1
                 await asyncio.sleep(max(0.05, float(s.get("cycle_sleep_ms") or 250) / 1000.0))
             except asyncio.CancelledError:
                 self._log_event("run_loop_cancelled")
@@ -748,7 +814,12 @@ class MicroMakerEngine:
         if self.stats.start_equity > 0 and self.client:
             try:
                 bal = await self.client.fetch_balance()
-                equity = float((bal.get("USDT") or {}).get("total") or 0)
+                usdt = bal.get("USDT") or {}
+                equity = float(usdt.get("total") or 0)
+                self.stats.live_equity = equity
+                self.stats.live_unrealized = float(usdt.get("unrealized") or 0.0)
+                self.stats.live_used_margin = float(usdt.get("used") or 0.0)
+                self.stats.net_equity_pnl = (equity - float(self.stats.start_equity or 0.0)) if self.stats.start_equity else 0.0
                 if equity > 0 and self.stats.start_equity - equity >= float(s.get("daily_loss_limit_usdt") or 2):
                     self._log_event("risk_stop_daily_loss", start_equity=self.stats.start_equity, equity=equity, limit=s.get("daily_loss_limit_usdt"))
                     await self._notify(f"🛑 Daily loss limit hit: start={self.stats.start_equity:.4f}, now={equity:.4f}")
@@ -883,6 +954,7 @@ class MicroMakerEngine:
                     add_scan_detail(sym, "reject", "bad_top_of_book", bid=bid, ask=ask, source=book.get("source"))
                     continue
                 tick = await client.price_tick(sym)
+                self._record_mid_price(sym, bid, ask, tick)
                 spread_ticks = (ask - bid) / max(tick, 1e-12)
                 min_spread = float(s.get("min_spread_ticks") or 1)
                 max_spread = float(s.get("max_spread_ticks") or 4)
@@ -931,7 +1003,9 @@ class MicroMakerEngine:
                     micro_score = min(abs(float(em.get("micro_ticks") or 0.0)) * 8.0, 6.0)
                 except Exception:
                     em, top_score, micro_score = {}, 0.0, 0.0
-                score = depth_score + spread_score + imbalance_score + volume_score + top_score + micro_score
+                move_ticks, move_age = self._recent_move_ticks(sym, float(s.get("wave_lookback_sec") or s.get("basket_rebound_lookback_sec") or 20.0), tick)
+                wave_score = min(abs(float(move_ticks or 0.0)) * 2.0, 18.0) if bool(s.get("wave_basket_enabled", False)) else 0.0
+                score = depth_score + spread_score + imbalance_score + volume_score + top_score + micro_score + wave_score
                 scored.append({
                     "symbol": sym,
                     "score": score,
@@ -948,6 +1022,8 @@ class MicroMakerEngine:
                     "tick": tick,
                     "top_imbalance": em.get("top_imbalance"),
                     "micro_ticks": em.get("micro_ticks"),
+                    "move_ticks": move_ticks,
+                    "move_age": move_age,
                     "source": book.get("source", "rest"),
                 })
                 add_scan_detail(sym, "valid", score=score, bias=bias, bid=bid, ask=ask, spread_ticks=spread_ticks, depth_min=depth_min, required_depth=required_depth, imbalance=imbalance, quote_volume=quote_volume, source=book.get("source", "rest"))
@@ -1040,6 +1116,42 @@ class MicroMakerEngine:
         self.stats.current_symbols = shown[:]
         return picks
 
+    def _record_mid_price(self, symbol: str, bid: float, ask: float, tick: float) -> None:
+        """Keep a tiny in-memory mid-price history for rebound entries."""
+        try:
+            sid = MexcFuturesClient.contract_id(symbol)
+            mid = (float(bid) + float(ask)) / 2.0
+            now = time.time()
+            arr = self.mid_history.setdefault(sid, [])
+            arr.append((now, mid, float(tick or 0.0)))
+            settings = self._settings()
+            lookback = max(float(settings.get("basket_rebound_lookback_sec") or 25.0), float(settings.get("wave_lookback_sec") or 20.0))
+            cutoff = now - max(90.0, lookback * 4.0)
+            if len(arr) > 300 or (arr and arr[0][0] < cutoff):
+                self.mid_history[sid] = [x for x in arr[-300:] if x[0] >= cutoff]
+        except Exception:
+            pass
+
+    def _recent_move_ticks(self, symbol: str, lookback_sec: float, tick: float) -> tuple[float | None, float]:
+        """Return mid-price move in ticks over the lookback window, plus sample age."""
+        sid = MexcFuturesClient.contract_id(symbol)
+        arr = self.mid_history.get(sid) or []
+        if len(arr) < 2 or tick <= 0:
+            return None, 0.0
+        now = time.time()
+        target_ts = now - max(1.0, float(lookback_sec or 1.0))
+        old = arr[0]
+        for row in arr:
+            if row[0] <= target_ts:
+                old = row
+            else:
+                break
+        cur = arr[-1]
+        age = cur[0] - old[0]
+        if age < max(1.0, float(lookback_sec or 1.0) * 0.35):
+            return None, age
+        return (float(cur[1]) - float(old[1])) / max(float(tick), 1e-12), age
+
     async def _edge_metrics(self, symbol: str, s: dict[str, Any], book: dict[str, Any]) -> dict[str, Any]:
         """Cheap live edge metrics from the current book.
 
@@ -1081,23 +1193,84 @@ class MicroMakerEngine:
         else:
             forced = None
 
-        # v0029 Basket Harvest: semi-random basket entries. We still avoid totally
-        # dead books in the scanner, but direction is deliberately simple: follow
-        # the current book pressure; if the book is nearly balanced, randomize.
-        if bool(s.get("basket_harvest_enabled", False)):
-            if forced:
-                return forced
+        # v0032 Wave Hunter: trend-following basket entries.
+        # A single coin is allowed only when its recent move supports the global wave side.
+        # The run loop opens the whole basket only after enough coins point to the same side.
+        if bool(s.get("wave_basket_enabled", False)):
             try:
                 m0 = await self._edge_metrics(symbol, s, book)
+                lookback = float(s.get("wave_lookback_sec") or 20.0)
+                min_move = float(s.get("wave_min_move_ticks") or 2.0)
+                move_ticks, sample_age = self._recent_move_ticks(symbol, lookback, float(m0.get("tick") or 0.0))
+                if move_ticks is None:
+                    self._log_debug("wave_wait_history", symbol=symbol, sample_age=sample_age, lookback=lookback)
+                    return None
+                depth_ratio = float(s.get("min_imbalance_ratio") or 1.03)
+                top_ratio = float(s.get("wave_entry_top_ratio") or 1.02)
+                micro_min = float(s.get("wave_entry_micro_ticks") or 0.0)
                 db = float(m0.get("depth_bid") or 0.0)
                 da = float(m0.get("depth_ask") or 0.0)
-                if db > da * 1.01:
+                bt = float(m0.get("bid_top") or 0.0)
+                at = float(m0.get("ask_top") or 0.0)
+                micro = float(m0.get("micro_ticks") or 0.0)
+                long_score = int(db >= da * depth_ratio) + int(bt >= at * top_ratio) + int(micro >= micro_min)
+                short_score = int(da >= db * depth_ratio) + int(at >= bt * top_ratio) + int(micro <= -micro_min)
+                long_ok = move_ticks >= min_move and long_score >= 1
+                short_ok = move_ticks <= -min_move and short_score >= 1
+                if forced == "long":
+                    return "long" if long_ok else None
+                if forced == "short":
+                    return "short" if short_ok else None
+                if long_ok and not short_ok:
                     return "long"
-                if da > db * 1.01:
+                if short_ok and not long_ok:
                     return "short"
-            except Exception:
-                pass
-            return random.choice(["long", "short"])
+                if long_ok and short_ok:
+                    return "long" if move_ticks > 0 else "short"
+                self._log_debug("wave_direction_reject", symbol=symbol, move_ticks=move_ticks, sample_age=sample_age, long_score=long_score, short_score=short_score, depth_bid=db, depth_ask=da, bid_top=bt, ask_top=at, micro_ticks=micro)
+                return None
+            except Exception as e:
+                self._log_error("wave_direction_error", e, symbol=symbol)
+                return None
+
+        # v0032 Wave Hunter: no random entries. Enter only after a short
+        # impulse and only in the rebound direction, confirmed by top-book support
+        # and microprice. This keeps the 3-position basket idea, but avoids opening
+        # positions that can sit underwater for hours after trend-following fills.
+        if bool(s.get("basket_harvest_enabled", False)):
+            try:
+                m0 = await self._edge_metrics(symbol, s, book)
+                lookback = float(s.get("basket_rebound_lookback_sec") or 25.0)
+                min_move = float(s.get("basket_rebound_min_move_ticks") or 3.0)
+                move_ticks, sample_age = self._recent_move_ticks(symbol, lookback, float(m0.get("tick") or 0.0))
+                if move_ticks is None:
+                    self._log_debug("basket_rebound_wait_history", symbol=symbol, sample_age=sample_age, lookback=lookback)
+                    return None
+                depth_ratio = float(s.get("min_imbalance_ratio") or 1.03)
+                top_ratio = float(s.get("basket_rebound_confirm_top_ratio") or s.get("entry_top_imbalance_ratio") or 1.15)
+                micro_min = float(s.get("basket_rebound_confirm_micro_ticks") or s.get("entry_microprice_min_ticks") or 0.05)
+                db = float(m0.get("depth_bid") or 0.0)
+                da = float(m0.get("depth_ask") or 0.0)
+                bt = float(m0.get("bid_top") or 0.0)
+                at = float(m0.get("ask_top") or 0.0)
+                micro = float(m0.get("micro_ticks") or 0.0)
+                long_score = int(db >= da * depth_ratio) + int(bt >= at * top_ratio) + int(micro >= micro_min)
+                short_score = int(da >= db * depth_ratio) + int(at >= bt * top_ratio) + int(micro <= -micro_min)
+                long_ok = move_ticks <= -min_move and long_score >= 2
+                short_ok = move_ticks >= min_move and short_score >= 2
+                if forced == "long":
+                    return "long" if long_ok else None
+                if forced == "short":
+                    return "short" if short_ok else None
+                if long_ok:
+                    return "long"
+                if short_ok:
+                    return "short"
+                self._log_debug("basket_rebound_direction_reject", symbol=symbol, move_ticks=move_ticks, sample_age=sample_age, long_score=long_score, short_score=short_score, depth_bid=db, depth_ask=da, bid_top=bt, ask_top=at, micro_ticks=micro)
+                return None
+            except Exception as e:
+                self._log_error("basket_rebound_direction_error", e, symbol=symbol)
+                return None
 
         m = await self._edge_metrics(symbol, s, book)
         ratio = float(s.get("min_imbalance_ratio") or 1.04)
@@ -1171,6 +1344,342 @@ class MicroMakerEngine:
             self._log_error("pretrade_fee_guard_error", e, symbol=symbol)
             return False
 
+
+    def _detect_wave_signal(self, rows: list[dict[str, Any]], s: dict[str, Any]) -> tuple[str | None, list[dict[str, Any]], dict[str, Any]]:
+        """Return a market-wide wave side and the best rows for that side.
+
+        This is the v0032 ambush: do not open one-by-one. Wait until enough
+        candidates in the scanned universe point to the same LONG/SHORT impulse,
+        then fire the basket immediately.
+        """
+        now = time.time()
+        usable = [r for r in rows if r.get("bias") in {"long", "short"}]
+        need = max(1, int(s.get("wave_positions") or s.get("max_positions") or 5))
+        min_candidates = max(1, int(s.get("wave_min_candidates") or need))
+        min_ratio = max(0.1, min(1.0, float(s.get("wave_min_side_ratio") or 0.60)))
+        if not usable:
+            self.wave_candidate_side = None
+            self.wave_candidate_count = 0
+            return None, [], {"reason": "no_wave_candidates", "usable": 0}
+        longs = [r for r in usable if r.get("bias") == "long"]
+        shorts = [r for r in usable if r.get("bias") == "short"]
+        side = "long" if len(longs) >= len(shorts) else "short"
+        side_rows = longs if side == "long" else shorts
+        ratio = len(side_rows) / max(len(usable), 1)
+        details = {
+            "usable": len(usable),
+            "long": len(longs),
+            "short": len(shorts),
+            "side": side,
+            "ratio": ratio,
+            "need": need,
+            "min_candidates": min_candidates,
+            "min_ratio": min_ratio,
+        }
+        if len(side_rows) < min_candidates or ratio < min_ratio:
+            self.wave_candidate_side = None
+            self.wave_candidate_count = 0
+            details["reason"] = "weak_market_consensus"
+            return None, [], details
+        confirm_need = max(1, int(s.get("wave_entry_confirmations") or 1))
+        if self.wave_candidate_side == side and now - self.wave_cooldown_until_ts >= 0:
+            self.wave_candidate_count += 1
+        else:
+            self.wave_candidate_side = side
+            self.wave_candidate_count = 1
+        details["confirm"] = self.wave_candidate_count
+        details["confirm_need"] = confirm_need
+        if self.wave_candidate_count < confirm_need:
+            details["reason"] = "confirming"
+            return None, [], details
+        # Prefer best-scored coins, but also require the same side.
+        picked = sorted(side_rows, key=lambda r: float(r.get("score") or 0.0), reverse=True)[:need]
+        return side, picked, details
+
+    async def _wave_loop_tick(self, s: dict[str, Any]) -> None:
+        if self.active_tasks:
+            return
+        now = time.time()
+        if now < self.wave_cooldown_until_ts:
+            self.stats.last_action = f"wave cooldown: {self.wave_cooldown_until_ts - now:.0f}s"
+            return
+        client = await self._ensure_client()
+        try:
+            existing = [p for p in await client.fetch_positions() if str(p.get("symbol") or "").upper().endswith("_USDT")]
+        except Exception as e:
+            existing = []
+            self._log_error("wave_existing_positions_check_error", e)
+        if existing:
+            self.stats.open_position_symbols = [str(p.get("symbol")) for p in existing if p.get("symbol")]
+            self.stats.current_symbols = self.stats.open_position_symbols[: max(1, int(s.get("wave_positions") or 5))]
+            self.stats.last_action = "wave wait: existing positions detected; use Close All or let previous manager finish before new wave"
+            self._log_event("wave_skip_existing_positions", positions=existing)
+            return
+        rows = await self._refresh_market_scan(s, force=False)
+        side, picks, details = self._detect_wave_signal(rows, s)
+        self._log_debug("wave_signal_check", **details, picks=[r.get("symbol") for r in picks])
+        if not side:
+            reason = details.get("reason") or "waiting"
+            self.stats.last_action = f"wave wait: {reason} L/S={details.get('long', 0)}/{details.get('short', 0)}"
+            return
+        key = f"WAVE_{side.upper()}"
+        self.stats.current_symbols = [r.get("symbol") for r in picks]
+        self.stats.last_action = f"WAVE {side.upper()} FIRE: {', '.join(self.stats.current_symbols[:8])}"
+        self._log_event("wave_fire", side=side, picks=picks, details=details)
+        await self._notify(f"🚀 WAVE {side.upper()}: открываю корзину {len(picks)} монет разом: " + ", ".join(self.stats.current_symbols[:10]))
+        self.active_tasks[key] = asyncio.create_task(self._wave_basket_cycle(side, picks), name=key)
+        # Reset confirmation so the next cycle must see a fresh wave.
+        self.wave_candidate_side = None
+        self.wave_candidate_count = 0
+
+    async def _open_wave_position(self, symbol: str, direction: str, s: dict[str, Any], equity_before: float | None) -> dict[str, Any] | None:
+        """Open one position for the wave basket without independent management."""
+        if self._is_ignored_symbol(symbol, s):
+            return None
+        client = await self._ensure_client()
+        book = await self._depth(symbol, limit=10)
+        if not book.get("bids") or not book.get("asks"):
+            self._log_debug("wave_open_no_book", symbol=symbol)
+            return None
+        bid, ask = float(book["bids"][0][0]), float(book["asks"][0][0])
+        tick = await client.price_tick(symbol)
+        self._record_mid_price(symbol, bid, ask, tick)
+        spread_ticks = (ask - bid) / max(tick, 1e-12)
+        if spread_ticks > float(s.get("max_spread_ticks") or 2) + 1e-9:
+            self._log_debug("wave_open_spread_reject", symbol=symbol, spread_ticks=spread_ticks)
+            return None
+        # Re-evaluate the coin in the same wave side right before open. This is cheap
+        # and prevents stale rows from entering after a flip, but it does not wait.
+        direction_now = await self._choose_direction(symbol, s, book)
+        if direction_now != direction:
+            self._log_debug("wave_open_side_flip", symbol=symbol, want=direction, now=direction_now)
+            return None
+        if not await self._pretrade_fee_guard(symbol, s, client):
+            return None
+        leverage = int(s.get("leverage") or 5)
+        open_type = int(s.get("open_type") or 1)
+        margin_usdt, margin_note = await self._position_margin_usdt(s)
+        if margin_usdt <= 0:
+            self._log_event("wave_open_no_margin", symbol=symbol, margin_note=margin_note)
+            return None
+        entry_price = ask if direction == "long" else bid
+        try:
+            vol = await client.vol_from_margin(symbol, margin_usdt, leverage, entry_price)
+            actual_margin = (await client.amount_from_contracts(symbol, vol)) * entry_price / max(leverage, 1)
+        except Exception as e:
+            if self._is_symbol_reject_error(e):
+                self._ignore_symbol(symbol, f"wave volume/margin reject: {str(e)[:160]}")
+                return None
+            raise
+        if str(s.get("position_size_mode") or "balance_percent").lower() == "balance_percent" and actual_margin > margin_usdt * 1.05:
+            reason = f"min order too large for wave slot: desired_margin={margin_usdt:.4f}, min_actual_margin={actual_margin:.4f}"
+            if "capped by available balance" in margin_note:
+                self._log_event("wave_free_margin_too_low", symbol=symbol, reason=reason, margin_note=margin_note)
+                return None
+            self._ignore_symbol(symbol, reason)
+            return None
+        post_only = bool(s.get("wave_entry_post_only", False))
+        self._log_event("wave_entry_prepare", symbol=symbol, direction=direction, vol=vol, entry_price=entry_price, post_only=post_only, margin_note=margin_note, actual_margin=actual_margin, bid=bid, ask=ask, equity_before=equity_before)
+        try:
+            if post_only:
+                # Safer maker entry, but can miss fast waves.
+                px = bid if direction == "long" else ask
+                order = await client.open_post_only(symbol, direction, vol, px, leverage, open_type)
+            else:
+                # Fast entry for wave mode: normal limit at the opposite best quote.
+                side_code = 1 if direction == "long" else 3
+                px = await client.round_price(symbol, entry_price, "ceil" if direction == "long" else "floor")
+                order = await client.place_order(symbol, side_code, 1, vol, px, leverage, open_type, external_oid=f"wave_open_{int(time.time()*1000)%10**10}")
+        except Exception as e:
+            if self._is_symbol_reject_error(e):
+                self._ignore_symbol(symbol, f"wave open reject: {str(e)[:160]}")
+                return None
+            self.stats.last_error = f"{symbol} wave open error: {str(e)[:180]}"
+            self._log_error("wave_entry_order_error", e, symbol=symbol, direction=direction, vol=vol)
+            return None
+        oid = order.get("id")
+        await asyncio.sleep(max(0.05, float(s.get("wave_entry_order_lifetime_ms") or s.get("order_lifetime_ms") or 450) / 1000.0))
+        try:
+            if oid:
+                cancel_res = await client.cancel_order(oid, symbol)
+                self._log_debug("wave_entry_cancel_after_lifetime", symbol=symbol, order_id=oid, result=cancel_res)
+        except Exception as e:
+            self._log_error("wave_entry_cancel_error", e, symbol=symbol, order_id=oid)
+            try:
+                await client.cancel_all_orders(symbol)
+            except Exception as e2:
+                self._log_error("wave_entry_cancel_all_error", e2, symbol=symbol)
+        pos = await client.find_position(symbol, direction)
+        if not pos:
+            self._log_event("wave_entry_not_filled", symbol=symbol, order_id=oid)
+            return None
+        fee_bad, fee_info = self._position_has_nonzero_fee(pos)
+        if fee_bad:
+            aborted = await self._abort_invalid_fee_position(client, symbol, direction, pos, s, equity_before=equity_before, reason_info=fee_info)
+            if aborted:
+                return None
+        self.stats.trade_timestamps.append(time.time())
+        if symbol not in self.stats.open_position_symbols:
+            self.stats.open_position_symbols.append(symbol)
+        self._log_event("wave_entry_filled", symbol=symbol, direction=direction, position=pos)
+        return pos
+
+    async def _close_wave_positions(self, client: MexcFuturesClient, positions: list[dict[str, Any]], s: dict[str, Any], reason: str) -> dict[str, Any]:
+        leverage = int(s.get("leverage") or 5)
+        open_type = int(s.get("open_type") or 1)
+        symbols = sorted({MexcFuturesClient.contract_id(p.get("symbol")) for p in positions if p.get("symbol")})
+        results: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = []
+        self._log_event("wave_close_start", reason=reason, symbols=symbols, positions=positions)
+        for sym in symbols:
+            try:
+                results.append({"stage": "cancel_before", "symbol": sym, "result": await client.cancel_all_orders(sym)})
+            except Exception as e:
+                errors.append({"stage": "cancel_before", "symbol": sym, "error": str(e)[:220]})
+        for p in positions:
+            try:
+                if str(s.get("wave_close_mode") or "market").lower() == "market":
+                    results.append({"stage": "close_market", "symbol": p.get("symbol"), "result": await client.close_market(p, leverage, open_type)})
+                else:
+                    book = await self._depth(str(p.get("symbol")), limit=5)
+                    if not book.get("bids") or not book.get("asks"):
+                        results.append({"stage": "close_market_fallback", "symbol": p.get("symbol"), "result": await client.close_market(p, leverage, open_type)})
+                    else:
+                        px = float(book["bids"][0][0]) if p.get("side") == "long" else float(book["asks"][0][0])
+                        results.append({"stage": "close_limit_fast", "symbol": p.get("symbol"), "result": await client.close_limit(str(p.get("symbol")), str(p.get("side")), int(round(float(p.get("contracts") or 0))), px, leverage, open_type, post_only=False)})
+            except Exception as e:
+                # If MEXC says nonexistent/closed, it is not fatal for a basket close.
+                if "2009" in str(e) or "nonexistent" in str(e).lower() or "closed" in str(e).lower():
+                    results.append({"stage": "already_closed", "symbol": p.get("symbol"), "note": str(e)[:180]})
+                else:
+                    errors.append({"stage": "close", "symbol": p.get("symbol"), "error": str(e)[:260]})
+        await asyncio.sleep(0.4)
+        for sym in symbols:
+            try:
+                results.append({"stage": "cancel_after", "symbol": sym, "result": await client.cancel_all_orders(sym)})
+            except Exception as e:
+                errors.append({"stage": "cancel_after", "symbol": sym, "error": str(e)[:220]})
+        res = {"ok": not errors, "results": results, "errors": errors}
+        self._log_event("wave_close_done", result=res)
+        return res
+
+    async def _wave_basket_cycle(self, side: str, rows: list[dict[str, Any]]) -> None:
+        client = await self._ensure_client()
+        s = self._settings()
+        symbols = [MexcFuturesClient.contract_id(r.get("symbol")) for r in rows if r.get("symbol")]
+        target = max(0.0001, float(s.get("wave_target_profit_usdt") or 0.05))
+        min_take = max(0.0, float(s.get("wave_min_take_profit_usdt") or 0.03))
+        giveback = max(0.0, float(s.get("wave_trailing_giveback_usdt") or 0.02))
+        be_after = max(0.0, float(s.get("wave_break_even_after_sec") or 600.0))
+        be_profit = max(0.0, float(s.get("wave_breakeven_profit_usdt") or 0.001))
+        max_hold = max(be_after, float(s.get("wave_max_hold_sec") or 900.0))
+        max_loss_exit = max(0.0, float(s.get("wave_max_loss_exit_usdt") or 0.0))
+        min_filled = max(1, int(s.get("wave_min_filled_positions") or 3))
+        equity_before = await self._read_usdt_total(client) if bool(s.get("real_pnl_enabled", True)) else None
+        opened: list[dict[str, Any]] = []
+        started = time.time()
+        self._log_event("wave_cycle_start", side=side, symbols=symbols, target=target, equity_before=equity_before)
+        for sym in symbols:
+            if not self.running:
+                break
+            if len(opened) >= int(s.get("wave_positions") or 5):
+                break
+            pos = await self._open_wave_position(sym, side, s, equity_before)
+            if pos:
+                opened.append(pos)
+                self.stats.current_symbols = [p.get("symbol") for p in opened] + [x for x in symbols if x not in [p.get("symbol") for p in opened]][: max(0, int(s.get("wave_positions") or 5)-len(opened))]
+            # Minimal pause: not a delayed 3+2 mode, just protects the private API.
+            await asyncio.sleep(0.04)
+        if not opened:
+            self.stats.last_action = "wave fired but no entries filled"
+            self._log_event("wave_cycle_no_fills", side=side, symbols=symbols)
+            return
+        if len(opened) < min_filled:
+            self._log_event("wave_cycle_underfilled", filled=len(opened), min_filled=min_filled, symbols=[p.get("symbol") for p in opened])
+        await self._notify(f"✅ WAVE {side.upper()} FILLED: {', '.join([p.get('symbol') for p in opened])}. Жду NET +${target:.3f}.")
+        peak_net = -999.0
+        reason = "running"
+        close_sent = False
+        while self.running:
+            # Work only the symbols that belong to this basket.
+            positions: list[dict[str, Any]] = []
+            for sym in [p.get("symbol") for p in opened if p.get("symbol")]:
+                try:
+                    positions.extend(await client.fetch_positions(str(sym)))
+                except Exception as e:
+                    self._log_error("wave_fetch_position_error", e, symbol=sym)
+            # Keep same-side positions from this basket; if the exchange returns none, it is closed.
+            positions = [p for p in positions if p.get("side") == side]
+            self.stats.open_position_symbols = [p.get("symbol") for p in positions if p.get("symbol")]
+            if not positions:
+                reason = "basket_positions_closed"
+                break
+            # Abort if an already-open position proves the contract is not fee-free.
+            fee_bad_positions = []
+            for ppos in positions:
+                fee_bad, fee_info = self._position_has_nonzero_fee(ppos)
+                if fee_bad and bool(s.get("abort_nonzero_fee_position", True)):
+                    fee_bad_positions.append((ppos, fee_info))
+            if fee_bad_positions:
+                reason = "actual_fee_detected"
+                self._log_event("wave_actual_fee_detected", items=[{"position": ppos, "fee_info": info} for ppos, info in fee_bad_positions])
+                await self._close_wave_positions(client, positions, s, reason)
+                close_sent = True
+                break
+            await self._refresh_equity_snapshot(client)
+            net = float(self.stats.net_equity_pnl or 0.0)
+            if equity_before is not None and self.stats.live_equity:
+                net = float(self.stats.live_equity) - float(equity_before)
+            peak_net = max(peak_net, net)
+            elapsed = time.time() - started
+            should_close = False
+            if net >= target:
+                reason = "target_net_profit"
+                should_close = True
+            elif peak_net >= min_take and giveback > 0 and net <= peak_net - giveback:
+                reason = "trail_take_profit"
+                should_close = True
+            elif be_after > 0 and elapsed >= be_after and net >= be_profit:
+                reason = "timeout_breakeven_profit"
+                should_close = True
+            elif max_loss_exit > 0 and elapsed >= max_hold and net <= -max_loss_exit:
+                reason = "max_hold_loss_exit"
+                should_close = True
+            elif max_hold > 0 and elapsed >= max_hold and net >= 0:
+                reason = "max_hold_nonnegative_exit"
+                should_close = True
+            self.stats.last_action = f"wave {side}: net={net:.5f}/{target:.5f}, peak={peak_net:.5f}, open={len(positions)}, t={elapsed:.0f}s"
+            self._log_debug("wave_manage_tick", side=side, net=net, peak_net=peak_net, target=target, elapsed=elapsed, open_symbols=self.stats.open_position_symbols, reason=reason if should_close else "")
+            if should_close:
+                await self._close_wave_positions(client, positions, s, reason)
+                close_sent = True
+                break
+            await asyncio.sleep(0.45)
+        await asyncio.sleep(0.5)
+        equity_after = await self._read_usdt_total(client) if bool(s.get("real_pnl_enabled", True)) else None
+        pnl = 0.0
+        if equity_before is not None and equity_after is not None:
+            pnl = float(equity_after) - float(equity_before)
+        # Count one wave cycle as one trade/cycle, not one per coin.
+        self.stats.estimated_pnl += pnl
+        self.stats.trades += 1
+        win_min = max(0.0, float(s.get("real_win_min_usdt") or 0.0))
+        is_win = pnl > win_min
+        self._increment_total_trade_counters(pnl, is_win=is_win)
+        if is_win:
+            self.stats.wins += 1
+            self.stats.consecutive_losses = 0
+        else:
+            self.stats.losses += 1
+            self.stats.consecutive_losses += 1
+        self.last_trade_closed_ts = time.time()
+        self.wave_cooldown_until_ts = time.time() + max(0.0, float(s.get("wave_cooldown_after_cycle_sec") or 20.0))
+        await self._refresh_equity_snapshot(client)
+        self._log_event("wave_cycle_closed", side=side, reason=reason, close_sent=close_sent, opened=[p.get("symbol") for p in opened], pnl=pnl, equity_before=equity_before, equity_after=equity_after, is_win=is_win)
+        self.stats.last_action = f"wave {side} closed {reason}, pnl={pnl:.6f} USDT"
+        self.stats.open_position_symbols.clear()
+        await self._notify(f"🏁 WAVE {side.upper()} CLOSED reason={reason} pnl={pnl:.6f} USDT. Cooldown {float(s.get('wave_cooldown_after_cycle_sec') or 20):.0f}s.")
+
     async def _trade_cycle(self, symbol: str) -> None:
         self._log_event("trade_cycle_start", symbol=symbol)
         if self._is_ignored_symbol(symbol):
@@ -1201,6 +1710,7 @@ class MicroMakerEngine:
             return
         bid, ask = book["bids"][0][0], book["asks"][0][0]
         tick = await client.price_tick(symbol)
+        self._record_mid_price(symbol, bid, ask, tick)
         spread_ticks = (ask - bid) / max(tick, 1e-12)
         min_spread = float(s.get("min_spread_ticks") or 1)
         max_spread = float(s.get("max_spread_ticks") or 4)
@@ -1225,6 +1735,7 @@ class MicroMakerEngine:
                     self._log_debug("trade_cycle_recheck_no_book", symbol=symbol, check=idx + 1, source=book2.get("source"))
                     return
                 bid2, ask2 = book2["bids"][0][0], book2["asks"][0][0]
+                self._record_mid_price(symbol, bid2, ask2, tick)
                 spread_ticks2 = (ask2 - bid2) / max(tick, 1e-12)
                 if spread_ticks2 + 1e-9 < min_spread or spread_ticks2 > max_spread + 1e-9:
                     self.stats.last_action = f"{symbol}: recheck spread reject"
@@ -1305,6 +1816,11 @@ class MicroMakerEngine:
             self.stats.last_action = f"{symbol}: entry not filled"
             self._log_event("entry_not_filled", symbol=symbol, order_id=oid)
             return
+        fee_bad, fee_info = self._position_has_nonzero_fee(pos)
+        if fee_bad:
+            aborted = await self._abort_invalid_fee_position(client, symbol, direction, pos, s, equity_before=equity_before, reason_info=fee_info)
+            if aborted:
+                return
         self.stats.trade_timestamps.append(time.time())
         if symbol not in self.stats.open_position_symbols:
             self.stats.open_position_symbols.append(symbol)
@@ -1313,7 +1829,7 @@ class MicroMakerEngine:
         await self._manage_position(symbol, direction, pos, s, equity_before=equity_before)
 
     async def _manage_basket_position(self, symbol: str, direction: str, pos: dict[str, Any], s: dict[str, Any], equity_before: float | None = None) -> None:
-        """v0029 Basket Harvest manager.
+        """v0032 Wave Hunter manager.
 
         No per-position stop. A position is closed only with a maker close order
         when the configured positive basket target is reachable. After the task
@@ -1329,6 +1845,9 @@ class MicroMakerEngine:
         tick_value = abs(float(tick or 0.0) * float(amount or 0.0))
         target_usdt = max(0.0001, float(s.get("basket_target_profit_usdt") or 0.01))
         min_proxy = max(target_usdt, float(s.get("basket_min_proxy_profit_usdt") or target_usdt))
+        breakeven_after = max(0.0, float(s.get("basket_break_even_after_sec") or 0.0))
+        breakeven_profit = max(0.0, float(s.get("basket_breakeven_profit_usdt") or 0.0005))
+        breakeven_band = max(0.0, float(s.get("basket_breakeven_band_usdt") or 0.0))
         target_ticks = max(1, int(math.ceil(target_usdt / max(tick_value, 1e-12))))
         close_order_id: str | None = None
         close_order_px: float | None = None
@@ -1348,6 +1867,9 @@ class MicroMakerEngine:
             target_usdt=target_usdt,
             min_proxy=min_proxy,
             target_ticks=target_ticks,
+            breakeven_after=breakeven_after,
+            breakeven_profit=breakeven_profit,
+            breakeven_band=breakeven_band,
             equity_before=equity_before,
             stop="OFF",
         )
@@ -1357,6 +1879,12 @@ class MicroMakerEngine:
                 reason = "basket_target_closed"
                 self._log_event("basket_position_closed", symbol=symbol, direction=direction)
                 break
+            fee_bad, fee_info = self._position_has_nonzero_fee(current)
+            if fee_bad and bool(s.get("abort_nonzero_fee_position", True)):
+                aborted = await self._abort_invalid_fee_position(client, symbol, direction, current, s, equity_before=equity_before, reason_info=fee_info)
+                if aborted:
+                    reason = "invalid_fee_aborted"
+                    break
             book = await self._depth(symbol, limit=5)
             if not book["bids"] or not book["asks"]:
                 self._log_debug("basket_no_book", symbol=symbol, direction=direction)
@@ -1365,19 +1893,31 @@ class MicroMakerEngine:
             bid, ask = book["bids"][0][0], book["asks"][0][0]
             exit_price_est = bid if direction == "long" else ask
             proxy_pnl = (exit_price_est - entry) * amount if direction == "long" else (entry - exit_price_est) * amount
-            target_price = entry + target_ticks * tick if direction == "long" else entry - target_ticks * tick
+            maker_pnl = (ask - entry) * amount if direction == "long" else (entry - bid) * amount
+            elapsed = time.time() - started
+            rotation_mode = bool(breakeven_after > 0 and elapsed >= breakeven_after)
+            active_target_usdt = breakeven_profit if rotation_mode else target_usdt
+            active_min_proxy = max(active_target_usdt, breakeven_profit if rotation_mode else min_proxy)
+            active_target_ticks = max(1, int(math.ceil(active_target_usdt / max(tick_value, 1e-12))))
+            target_price = entry + active_target_ticks * tick if direction == "long" else entry - active_target_ticks * tick
 
-            # Use maker-only close. If the market is already beyond target, quote
-            # at the best maker side to close quickly without crossing the spread.
+            # v0032 rotation: after the stale timeout, stop waiting for +$0.01.
+            # The close order is downgraded to breakeven/small-profit so the slot can
+            # rotate into a better coin. This is not a stop; it does not cross a loss.
             if direction == "long":
-                close_px = max(ask, target_price) if proxy_pnl >= min_proxy else target_price
+                close_px = max(ask, target_price) if proxy_pnl >= active_min_proxy else target_price
             else:
-                close_px = min(bid, target_price) if proxy_pnl >= min_proxy else target_price
+                close_px = min(bid, target_price) if proxy_pnl >= active_min_proxy else target_price
+            if rotation_mode and maker_pnl >= max(0.0, breakeven_profit - breakeven_band):
+                # Work a maker/limit exit around the best quote when that maker quote
+                # is already breakeven/small-profit. This rotates dead slots without
+                # intentionally crossing a loss.
+                close_px = ask if direction == "long" else bid
 
             now = time.time()
             requote_s = max(0.05, float(s.get("basket_close_requote_ms") or s.get("requote_interval_ms") or 200) / 1000.0)
             px_changed = close_order_px is None or abs(float(close_px) - float(close_order_px)) >= max(tick * 0.5, 1e-12)
-            should_requote = (not close_order_id) or px_changed or (now - close_order_ts >= requote_s and proxy_pnl >= min_proxy)
+            should_requote = (not close_order_id) or px_changed or (now - close_order_ts >= requote_s and (proxy_pnl >= active_min_proxy or rotation_mode))
             if should_requote:
                 try:
                     if close_order_id:
@@ -1407,8 +1947,8 @@ class MicroMakerEngine:
                 close_order_id = order.get("id")
                 close_order_px = close_px
                 close_order_ts = time.time()
-                self.stats.last_action = f"{symbol}: basket wait +${target_usdt:.3f}, proxy={proxy_pnl:.5f}, close_px={close_px}"
-                self._log_event("basket_close_submitted", symbol=symbol, direction=direction, contracts=contracts, close_px=close_px, target_price=target_price, target_ticks=target_ticks, target_usdt=target_usdt, proxy_pnl=proxy_pnl, order=order)
+                self.stats.last_action = f"{symbol}: basket {'BE' if rotation_mode else 'TP'} target=${active_target_usdt:.4f}, proxy={proxy_pnl:.5f}, close_px={close_px}"
+                self._log_event("basket_close_submitted", symbol=symbol, direction=direction, contracts=contracts, close_px=close_px, target_price=target_price, target_ticks=active_target_ticks, target_usdt=active_target_usdt, original_target_usdt=target_usdt, rotation_mode=rotation_mode, elapsed=elapsed, proxy_pnl=proxy_pnl, maker_pnl=maker_pnl, order=order)
             await asyncio.sleep(max(0.05, float(s.get("requote_interval_ms") or 200) / 1000.0))
 
         await asyncio.sleep(0.25)
@@ -1444,6 +1984,7 @@ class MicroMakerEngine:
         self._log_event("basket_trade_closed", symbol=symbol, direction=direction, reason=reason, entry=entry, exit_price_est=exit_price_est, contracts=contracts, amount=amount, pnl=pnl, pnl_source=pnl_source, virtual_pnl=virtual_pnl, equity_before=equity_before, equity_after=equity_after, session_trades=self.stats.trades, session_wins=self.stats.wins, session_losses=self.stats.losses, target_usdt=target_usdt, target_ticks=target_ticks, elapsed=time.time()-started, is_win=is_win)
         if symbol in self.stats.open_position_symbols:
             self.stats.open_position_symbols.remove(symbol)
+        await self._refresh_equity_snapshot(client)
         await self._notify(f"🏁 BASKET CLOSED {symbol} {direction.upper()} pnl={pnl:.6f} USDT ({pnl_source})")
 
     async def _manage_position(self, symbol: str, direction: str, pos: dict[str, Any], s: dict[str, Any], equity_before: float | None = None) -> None:
@@ -1584,4 +2125,5 @@ class MicroMakerEngine:
         self._log_event("trade_closed", symbol=symbol, direction=direction, reason=reason, entry=entry, exit_price_est=exit_price_est, contracts=contracts, amount=amount, pnl=pnl, pnl_source=pnl_source, virtual_pnl=virtual_pnl, equity_before=equity_before, equity_after=equity_after, session_trades=self.stats.trades, session_wins=self.stats.wins, session_losses=self.stats.losses, win_min=win_min, is_win=is_win)
         if symbol in self.stats.open_position_symbols:
             self.stats.open_position_symbols.remove(symbol)
+        await self._refresh_equity_snapshot(client)
         await self._notify(f"🏁 CLOSED {symbol} {direction.upper()} reason={reason} pnl={pnl:.6f} USDT ({pnl_source})")

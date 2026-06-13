@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 DEFAULTS: dict[str, Any] = {
-    "bot_version": "v0029",
+    "bot_version": "v0032",
 
     # secrets are set from Telegram with /api set KEY SECRET. Telegram token stays in ENV.
     "mexc_api_key": "",
@@ -31,10 +31,10 @@ DEFAULTS: dict[str, Any] = {
     "open_type": 1,  # 1 isolated, 2 cross on MEXC futures
     # one trade uses a percent of TOTAL USDT equity by default.
     "position_size_mode": "balance_percent",  # balance_percent | fixed_usdt
-    "position_margin_percent": 10.0,
+    "position_margin_percent": 20.0,
     "margin_per_position_usdt": 2.0,
-    "max_positions": 3,
-    "symbols_limit": 3,
+    "max_positions": 5,
+    "symbols_limit": 5,
 
     # micro-maker behavior
     # v0025: base ticks are kept small, but real fee/zero-fee guard can lift
@@ -105,7 +105,7 @@ DEFAULTS: dict[str, Any] = {
     "max_entry_maker_fee_rate": 0.0,
     "max_entry_taker_fee_rate": 0.0,
     "fee_guard_ignore_symbol": True,
-    "trade_profile": "basket_harvest_v0029",
+    "trade_profile": "wave_hunter_v0032",
     "edge_filter_enabled": False,
     "entry_top_imbalance_ratio": 1.15,
     "entry_microprice_min_ticks": 0.10,
@@ -117,12 +117,53 @@ DEFAULTS: dict[str, Any] = {
     # v0029 basket harvest: hold 3 live positions, no per-position stops,
     # close only when real/proxy profit target is reached, then immediately refill.
     "basket_harvest_enabled": True,
-    "basket_positions": 3,
-    "basket_target_profit_usdt": 0.01,
-    "basket_min_proxy_profit_usdt": 0.0105,
-    "basket_random_top_n": 25,
-    "basket_semi_random": True,
+    "basket_positions": 5,
+    "basket_target_profit_usdt": 0.05,
+    "basket_min_proxy_profit_usdt": 0.0505,
+    "basket_random_top_n": 12,
+    "basket_semi_random": False,
     "basket_close_requote_ms": 200,
+    # v0031 rebound/rotation mode: do not wait hours for +$0.01.
+    # After timeout, downgrade target to breakeven and rotate the slot when near zero.
+    "basket_rebound_enabled": True,
+    "basket_rebound_lookback_sec": 25.0,
+    "basket_rebound_min_move_ticks": 3.0,
+    "basket_rebound_confirm_top_ratio": 1.15,
+    "basket_rebound_confirm_micro_ticks": 0.05,
+    "basket_break_even_after_sec": 600.0,
+    "basket_breakeven_profit_usdt": 0.0005,
+    "basket_breakeven_band_usdt": 0.0,
+    "basket_force_breakeven_rotation": True,
+    # v0030 truth mode: panel/counters must not show green while open positions drag equity down.
+    "abort_nonzero_fee_position": True,
+    "emergency_market_close_invalid_fee": True,
+    "panel_show_net_equity_pnl": True,
+
+    # v0032 Wave Hunter: sit in ambush, detect a short market-wide impulse,
+    # then open the whole basket in one direction and close the whole basket on NET equity profit.
+    "wave_basket_enabled": True,
+    "wave_positions": 5,
+    "wave_margin_percent_test": 20.0,
+    "wave_margin_percent_large": 10.0,
+    "wave_lookback_sec": 20.0,
+    "wave_min_move_ticks": 2.0,
+    "wave_min_side_ratio": 0.60,
+    "wave_min_candidates": 5,
+    "wave_entry_confirmations": 1,
+    "wave_entry_top_ratio": 1.02,
+    "wave_entry_micro_ticks": 0.0,
+    "wave_target_profit_usdt": 0.05,
+    "wave_min_take_profit_usdt": 0.03,
+    "wave_trailing_giveback_usdt": 0.02,
+    "wave_break_even_after_sec": 600.0,
+    "wave_breakeven_profit_usdt": 0.001,
+    "wave_max_hold_sec": 900.0,
+    "wave_max_loss_exit_usdt": 0.0,
+    "wave_close_mode": "market",
+    "wave_entry_post_only": False,
+    "wave_entry_order_lifetime_ms": 450,
+    "wave_min_filled_positions": 3,
+    "wave_cooldown_after_cycle_sec": 20.0,
 
     # Persistently ignored symbols: regional restrictions, min/max margin/volume rejects, unsupported contracts.
     "ignored_symbols": {},
@@ -175,13 +216,13 @@ DEFAULTS: dict[str, Any] = {
 }
 
 
-BASKET_HARVEST_PROFILE_V0029: dict[str, Any] = {
+WAVE_HUNTER_PROFILE_V0032: dict[str, Any] = {
     # Basket-harvest live mode: 3 small positions, no per-position stops,
     # close only on +$0.01 real/proxy profit and immediately refill the basket.
     "leverage": 5,
-    "position_margin_percent": 10.0,
-    "max_positions": 3,
-    "symbols_limit": 3,
+    "position_margin_percent": 20.0,
+    "max_positions": 5,
+    "symbols_limit": 5,
     "max_zero_fee_scan_symbols": 100,
     "ws_depth_max_symbols": 100,
     "target_ticks": 0,
@@ -220,7 +261,7 @@ BASKET_HARVEST_PROFILE_V0029: dict[str, Any] = {
     "max_entry_maker_fee_rate": 0.0,
     "max_entry_taker_fee_rate": 0.0,
     "fee_guard_ignore_symbol": True,
-    "trade_profile": "basket_harvest_v0029",
+    "trade_profile": "wave_hunter_v0032",
     "edge_filter_enabled": False,
     "entry_top_imbalance_ratio": 1.15,
     "entry_microprice_min_ticks": 0.10,
@@ -229,18 +270,61 @@ BASKET_HARVEST_PROFILE_V0029: dict[str, Any] = {
     "min_gross_profit_usdt": 0.004,
     "real_win_min_usdt": 0.0005,
     "basket_harvest_enabled": True,
-    "basket_positions": 3,
-    "basket_target_profit_usdt": 0.01,
-    "basket_min_proxy_profit_usdt": 0.0105,
-    "basket_random_top_n": 25,
-    "basket_semi_random": True,
+    "basket_positions": 5,
+    "basket_target_profit_usdt": 0.05,
+    "basket_min_proxy_profit_usdt": 0.0505,
+    "basket_random_top_n": 12,
+    "basket_semi_random": False,
     "basket_close_requote_ms": 200,
+    # v0031 rebound/rotation mode: do not wait hours for +$0.01.
+    # After timeout, downgrade target to breakeven and rotate the slot when near zero.
+    "basket_rebound_enabled": True,
+    "basket_rebound_lookback_sec": 25.0,
+    "basket_rebound_min_move_ticks": 3.0,
+    "basket_rebound_confirm_top_ratio": 1.15,
+    "basket_rebound_confirm_micro_ticks": 0.05,
+    "basket_break_even_after_sec": 600.0,
+    "basket_breakeven_profit_usdt": 0.0005,
+    "basket_breakeven_band_usdt": 0.0,
+    "basket_force_breakeven_rotation": True,
+    # v0030 truth mode: panel/counters must not show green while open positions drag equity down.
+    "abort_nonzero_fee_position": True,
+    "emergency_market_close_invalid_fee": True,
+    "panel_show_net_equity_pnl": True,
+
+    # v0032 Wave Hunter: sit in ambush, detect a short market-wide impulse,
+    # then open the whole basket in one direction and close the whole basket on NET equity profit.
+    "wave_basket_enabled": True,
+    "wave_positions": 5,
+    "wave_margin_percent_test": 20.0,
+    "wave_margin_percent_large": 10.0,
+    "wave_lookback_sec": 20.0,
+    "wave_min_move_ticks": 2.0,
+    "wave_min_side_ratio": 0.60,
+    "wave_min_candidates": 5,
+    "wave_entry_confirmations": 1,
+    "wave_entry_top_ratio": 1.02,
+    "wave_entry_micro_ticks": 0.0,
+    "wave_target_profit_usdt": 0.05,
+    "wave_min_take_profit_usdt": 0.03,
+    "wave_trailing_giveback_usdt": 0.02,
+    "wave_break_even_after_sec": 600.0,
+    "wave_breakeven_profit_usdt": 0.001,
+    "wave_max_hold_sec": 900.0,
+    "wave_max_loss_exit_usdt": 0.0,
+    "wave_close_mode": "market",
+    "wave_entry_post_only": False,
+    "wave_entry_order_lifetime_ms": 450,
+    "wave_min_filled_positions": 3,
+    "wave_cooldown_after_cycle_sec": 20.0,
 }
 
 # Backwards-compatible import name used by main.py.
-ZERO_FEE_GUARD_PROFILE_V0025 = BASKET_HARVEST_PROFILE_V0029
-ACTIVE_PLUS_PROFILE_V0023 = BASKET_HARVEST_PROFILE_V0029
-EDGE_PLUS_PROFILE_V0027 = BASKET_HARVEST_PROFILE_V0029
+ZERO_FEE_GUARD_PROFILE_V0025 = WAVE_HUNTER_PROFILE_V0032
+ACTIVE_PLUS_PROFILE_V0023 = WAVE_HUNTER_PROFILE_V0032
+EDGE_PLUS_PROFILE_V0027 = WAVE_HUNTER_PROFILE_V0032
+BASKET_HARVEST_PROFILE_V0029 = WAVE_HUNTER_PROFILE_V0032
+BASKET_REBOUND_PROFILE_V0031 = WAVE_HUNTER_PROFILE_V0032
 
 
 

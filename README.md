@@ -1,24 +1,35 @@
-# MEXC Micro Maker Bot v0029
+# MEXC Micro Maker v0032 Wave Hunter
 
-Basket Harvest v0029.
+Режим переделан из одиночной/рандомной корзины в Market Wave Basket:
 
-Core idea:
-- keeps 3 active positions when possible;
-- each position uses 10% of total USDT equity as margin;
-- opens only API-confirmed / exact-contract zero-fee candidates;
-- no per-position stop loss;
-- closes a position only when the basket target is reached: default +0.01 USDT;
-- after a position closes, the bot immediately tries to refill the free slot;
-- real session PnL is counted from live USDT equity, not virtual price math.
+- Бот сидит в засаде и постоянно сканирует USDT zero-fee universe.
+- Сделки не открываются по одной и не открываются случайно.
+- Если большинство лучших монет показывает общий LONG-импульс — бот открывает корзину LONG.
+- Если большинство лучших монет показывает общий SHORT-импульс — бот открывает корзину SHORT.
+- Для теста на ~12 USDT профиль ставит 5 позиций × 20% total equity, плечо 5x.
+- Входы в корзину делаются сразу в одном направлении, без схемы 3+2.
+- Основная цель — закрыть всю корзину по NET equity profit, а не ждать +$0.01 по каждой монете.
+- Панель показывает NET equity PnL как главную правду.
+- Если MEXC после входа показывает реальную комиссию/feeRates, позиция считается невалидной и корзина закрывается/монета игнорируется.
 
-Use:
-/preset plus
-/ignore clear
-Start LIVE
+Default profile:
 
-Important: there is no per-position stop in this mode. Manual Stop leaves positions open and cancels active orders. Close All still closes everything by market manually.
+```text
+trade_profile = wave_hunter_v0032
+wave_basket_enabled = true
+positions = 5
+position_margin_percent = 20
+leverage = 5
+wave_target_profit_usdt = 0.05
+wave_min_take_profit_usdt = 0.03
+wave_break_even_after_sec = 600
+wave_max_hold_sec = 900
+wave_entry_post_only = false
+wave_close_mode = market
+```
 
+Notes:
 
-## v0029 fix
-- USDT-only quote filter: blocks *_USDC, *_USD, *_USD1 contracts to avoid `Balance insufficient available=0` on USDT-only accounts.
-- Basket display/slot logic now limits `Current` to the configured 3 active slots.
+- `wave_entry_post_only=false` нужен, чтобы не пропустить быстрый импульс. Вход — обычный limit на лучшую противоположную цену.
+- Закрытие корзины по умолчанию market, потому что цель режима — быстро забрать общий NET+ до затухания импульса.
+- Если при старте уже есть открытые позиции, бот не откроет новую wave-корзину поверх них. Сначала нужно закрыть старые позиции или дождаться их менеджера.

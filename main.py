@@ -242,7 +242,7 @@ def settings_menu() -> InlineKeyboardMarkup:
         [b("Panel 2s", "set:telegram_live_update_sec:2"), b("Panel 5s", "set:telegram_live_update_sec:5"), b("Panel 10s", "set:telegram_live_update_sec:10"), b("Stopped OFF", "set:telegram_live_stopped_update_sec:0")],
         [b("Dir BOTH", "set:direction_mode:both"), b("LONG", "set:direction_mode:long"), b("SHORT", "set:direction_mode:short")],
         [b("Emergency ON/OFF", "toggle:emergency_market_close"), b("Post-close ON/OFF", "toggle:post_only_close")],
-        [b("🧺 Basket Harvest v0028", "preset:plus"), b("Custom mode", "preset:custom")],
+        [b("🧺 Wave Hunter v0032", "preset:plus"), b("Custom mode", "preset:custom")],
         [b("⬅️ Back to Live", "menu:main")],
     ])
 
@@ -620,7 +620,7 @@ async def preset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     apply_plus_profile()
     engine = await ensure_engine(context, chat_id)
     engine.clear_ignored_symbols()
-    await upsert_panel(context, chat_id, "🧺 Basket Harvest v0028 применён: корзина 3×10%, zero-fee guard, real-PnL, закрытие только по +$0.01, логи режутся до 20 минут.\n\n" + settings_text(), settings_menu(), mode="settings")
+    await upsert_panel(context, chat_id, "🧺 Wave Hunter v0032 применён: засада, общий LONG/SHORT импульс, затем 5 позиций ×20%, закрытие всей корзины по NET+.\n\n" + settings_text(), settings_menu(), mode="settings")
 
 
 async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -919,7 +919,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/log_full clear — очистить полный лог\n\n"
         "Настройки:\n"
         "/set leverage 5 или /set leverage 10 — плечо\n"
-        "/set size 10 — одна сделка = 10% от TOTAL USDT equity\n"
+        "/set size 20 — одна сделка = 20% от TOTAL USDT equity для теста 12 USDT\n"
         "/set positions 1 — максимум открытых позиций\n"
         "/set symbols 1 — сколько монет торговать одновременно\n"
         "/set tp 1 — тейк в тиках\n"
@@ -1010,7 +1010,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if data == "preset:plus":
         apply_plus_profile()
         engine.clear_ignored_symbols()
-        await edit_query_as_panel(q, "🧺 Basket Harvest v0028 применён.\n\n" + settings_text(), settings_menu(), mode="settings")
+        await edit_query_as_panel(q, "🧺 Wave Hunter v0032 применён.\n\n" + settings_text(), settings_menu(), mode="settings")
         return
     if data == "preset:custom":
         STORE.set("trade_profile", "custom")
