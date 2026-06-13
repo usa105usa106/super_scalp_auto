@@ -96,9 +96,16 @@ class MicroMakerEngine:
 
     @staticmethod
     def _blocked_symbol(symbol: str) -> bool:
+        sym = str(symbol or "").upper().strip()
         # Per strategy rule: symbols containing STOCK are blocked. Metals, oil,
         # indexes and tokenized tickers without this substring remain allowed.
-        return "STOCK" in str(symbol or "").upper()
+        if "STOCK" in sym:
+            return True
+        # v0029: the account balance/margin shown by MEXC is USDT. Contracts like
+        # SOL_USDC/BTC_USDC require USDC collateral, so MEXC returns
+        # "Balance insufficient" with available=0 even when USDT is free.
+        # Basket mode must therefore trade only *_USDT contracts by default.
+        return not sym.endswith("_USDT")
 
     def _ignore_symbol(self, symbol: str, reason: str) -> None:
         """Persistently remove a bad symbol from scanner/trading.
@@ -425,9 +432,13 @@ class MicroMakerEngine:
         except Exception as e:
             self.stats.last_error = f"balance: {e}"
             self._log_error("start_balance_error", e)
+        try:
+            await self._adopt_existing_positions(self._settings())
+        except Exception as e:
+            self._log_error("start_adopt_positions_error", e)
         self.task = asyncio.create_task(self._run_loop(), name="micro_maker_loop")
         self._log_event("start_success", start_equity=self.stats.start_equity)
-        return "▶️ Micro Maker LIVE v0028 запущен. Basket Harvest: 3 позиции по 10%, стопов нет, закрытие только по +$0.01."
+        return "▶️ Micro Maker LIVE v0029 запущен. Basket Harvest: 3 позиции по 10%, стопов нет, закрытие только по +$0.01."
 
     async def stop(self, close_positions: bool = False) -> str:
         self._log_event("stop_requested", close_positions=close_positions, active_tasks=list(self.active_tasks.keys()))
@@ -521,7 +532,7 @@ class MicroMakerEngine:
         cooldown_left = max(0.0, self.cooldown_until_ts - time.time())
         cooldown_txt = f" | Cooldown: {cooldown_left:.0f}s" if cooldown_left > 0 else ""
         return (
-            f"🤖 MEXC Micro Maker LIVE {s.get('bot_version', 'v0028')}\n"
+            f"🤖 MEXC Micro Maker LIVE {s.get('bot_version', 'v0029')}\n"
             f"State: {state} | Updated: {last_update}{cooldown_txt}\n"
             f"Uptime: {h:02d}:{m:02d}:{sec:02d}\n\n"
             f"⚙️ {s.get('leverage')}x | Size: {s.get('position_margin_percent', 10)}% total | "
@@ -580,7 +591,7 @@ class MicroMakerEngine:
             "📊 Micro Maker Status\n\n"
             f"State: {'RUNNING' if self.is_running() else 'STOPPED'}\n"
             f"Active tasks: {len(self.active_tasks)} | Current: {', '.join(self.stats.current_symbols) or '-'}\n"
-            f"Version: {s.get('bot_version', 'v0028')}\n"
+            f"Version: {s.get('bot_version', 'v0029')}\n"
             f"Leverage: {s.get('leverage')}x | One trade size: {s.get('position_margin_percent', 10)}% of TOTAL USDT equity\n"
             f"Max positions: {s.get('max_positions')} | Symbols limit: {s.get('symbols_limit')}\n"
             f"Scanner: {'AUTO' if s.get('auto_select_symbols') else 'MANUAL'} | ZeroFee: {'ON' if s.get('only_zero_fee') else 'OFF'} | scan age: {age:.1f}s | rescan: {s.get('zero_fee_rescan_sec')}s\n"
@@ -636,9 +647,48 @@ class MicroMakerEngine:
             return "-"
         return ", ".join(f"{k}={v}" for k, v in sorted(counts.items(), key=lambda kv: (-int(kv[1]), str(kv[0])))[:5])
 
+    async def _adopt_existing_positions(self, s: dict[str, Any]) -> None:
+        """Attach basket managers to positions that already exist after redeploy.
+
+        Without this, a redeploy can leave old ONDO/BTC positions unmanaged and
+        the bot may open extra slots on top of them. v0029 adopts only *_USDT
+        positions because basket mode is USDT-collateral only.
+        """
+        if not bool(s.get("basket_harvest_enabled", False)):
+            return
+        client = await self._ensure_client()
+        try:
+            positions = await client.fetch_positions()
+        except Exception as e:
+            self._log_error("adopt_positions_fetch_error", e)
+            return
+        target_slots = min(int(s.get("max_positions") or 1), int(s.get("symbols_limit") or 1))
+        equity_now = await self._read_usdt_total(client) if bool(s.get("real_pnl_enabled", True)) else None
+        adopted = []
+        for pos in positions:
+            sym = MexcFuturesClient.contract_id(pos.get("symbol"))
+            if not sym or self._blocked_symbol(sym):
+                continue
+            if sym in self.active_tasks:
+                continue
+            if len(self.active_tasks) >= target_slots:
+                break
+            side = str(pos.get("side") or "").lower()
+            if side not in {"long", "short"}:
+                continue
+            if sym not in self.stats.open_position_symbols:
+                self.stats.open_position_symbols.append(sym)
+            task = asyncio.create_task(self._manage_position(sym, side, pos, s, equity_before=equity_now), name=f"adopt_{sym}")
+            self.active_tasks[sym] = task
+            adopted.append({"symbol": sym, "side": side, "contracts": pos.get("contracts"), "entry": pos.get("entryPrice")})
+        if adopted:
+            self.stats.current_symbols = list(self.active_tasks.keys())[:target_slots]
+            self._log_event("adopt_existing_positions", adopted=adopted, target_slots=target_slots)
+            await self._notify("♻️ Adopted existing positions: " + ", ".join(x["symbol"] for x in adopted))
+
     async def _run_loop(self) -> None:
         self._log_event("run_loop_started")
-        await self._notify("✅ LIVE loop v0028 started. Basket Harvest активен: 3 позиции по 10%, стопов нет, закрытие только по +$0.01.")
+        await self._notify("✅ LIVE loop v0029 started. Basket Harvest активен: 3 позиции по 10%, стопов нет, закрытие только по +$0.01.")
         while self.running:
             try:
                 s = self._settings()
@@ -646,9 +696,11 @@ class MicroMakerEngine:
                 await self._cleanup_tasks()
                 # Background scan runs even when all slots are busy. A better coin will be used as soon as capacity frees.
                 await self._refresh_market_scan(s, force=False)
-                capacity = max(0, min(int(s.get("max_positions") or 1), int(s.get("symbols_limit") or 1)) - len(self.active_tasks))
+                active_symbols = set(self.active_tasks.keys()) | set(self.stats.open_position_symbols)
+                target_slots = min(int(s.get("max_positions") or 1), int(s.get("symbols_limit") or 1))
+                capacity = max(0, target_slots - len(active_symbols))
                 if capacity > 0:
-                    symbols = await self._select_symbols(s)
+                    symbols = await self._select_symbols(s, capacity=capacity)
                     for sym in symbols:
                         if capacity <= 0:
                             break
@@ -948,7 +1000,7 @@ class MicroMakerEngine:
             return reordered
         return rows
 
-    async def _select_symbols(self, s: dict[str, Any]) -> list[str]:
+    async def _select_symbols(self, s: dict[str, Any], capacity: int | None = None) -> list[str]:
         rows = await self._refresh_market_scan(s, force=False)
         if not bool(s.get("basket_harvest_enabled", False)):
             rows = self._apply_switch_guard(rows, s)
@@ -956,8 +1008,15 @@ class MicroMakerEngine:
             self._log_debug("select_symbols_empty")
             return []
 
-        limit = max(1, int(s.get("symbols_limit") or 1))
+        configured_limit = max(1, int(s.get("symbols_limit") or 1))
+        if capacity is None:
+            limit = configured_limit
+        else:
+            limit = max(0, min(configured_limit, int(capacity)))
         active = set(self.active_tasks.keys()) | set(self.stats.open_position_symbols)
+        if limit <= 0:
+            self.stats.current_symbols = list(active)
+            return []
         candidates = [r for r in rows if r.get("symbol") not in active]
         if not candidates:
             self._log_debug("select_symbols_no_free_candidates", active=list(active), row_symbols=[r.get("symbol") for r in rows[:10]])
@@ -971,7 +1030,7 @@ class MicroMakerEngine:
         else:
             picks = [r["symbol"] for r in candidates[:limit]]
 
-        shown = list(active) + picks
+        shown = (list(active) + picks)[: max(1, int(s.get("symbols_limit") or 1))]
         if shown != self.last_selected_symbols:
             old_picks = self.last_selected_symbols[:]
             self.last_symbol_switch_ts = time.time()
@@ -1022,7 +1081,7 @@ class MicroMakerEngine:
         else:
             forced = None
 
-        # v0028 Basket Harvest: semi-random basket entries. We still avoid totally
+        # v0029 Basket Harvest: semi-random basket entries. We still avoid totally
         # dead books in the scanner, but direction is deliberately simple: follow
         # the current book pressure; if the book is nearly balanced, randomize.
         if bool(s.get("basket_harvest_enabled", False)):
@@ -1254,7 +1313,7 @@ class MicroMakerEngine:
         await self._manage_position(symbol, direction, pos, s, equity_before=equity_before)
 
     async def _manage_basket_position(self, symbol: str, direction: str, pos: dict[str, Any], s: dict[str, Any], equity_before: float | None = None) -> None:
-        """v0028 Basket Harvest manager.
+        """v0029 Basket Harvest manager.
 
         No per-position stop. A position is closed only with a maker close order
         when the configured positive basket target is reachable. After the task

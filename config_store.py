@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 DEFAULTS: dict[str, Any] = {
-    "bot_version": "v0028",
+    "bot_version": "v0029",
 
     # secrets are set from Telegram with /api set KEY SECRET. Telegram token stays in ENV.
     "mexc_api_key": "",
@@ -55,6 +55,9 @@ DEFAULTS: dict[str, Any] = {
     # Empty allowed_symbols = full-auto universe from API-confirmed zero-fee pairs.
     # If you set /symbols LINK_USDT,SOL_USDT then the scanner trades only that whitelist.
     "allowed_symbols": "",
+    # Basket mode trades only contracts settled in this quote currency.
+    # This prevents SOL_USDC/BTC_USDC attempts when the account has only USDT collateral.
+    "contract_quote_filter": "USDT",
     "only_zero_fee": True,
     "allow_manual_fee_fallback": False,
     "max_zero_fee_scan_symbols": 100,
@@ -102,7 +105,7 @@ DEFAULTS: dict[str, Any] = {
     "max_entry_maker_fee_rate": 0.0,
     "max_entry_taker_fee_rate": 0.0,
     "fee_guard_ignore_symbol": True,
-    "trade_profile": "basket_harvest_v0028",
+    "trade_profile": "basket_harvest_v0029",
     "edge_filter_enabled": False,
     "entry_top_imbalance_ratio": 1.15,
     "entry_microprice_min_ticks": 0.10,
@@ -111,7 +114,7 @@ DEFAULTS: dict[str, Any] = {
     "min_gross_profit_usdt": 0.004,
     "real_win_min_usdt": 0.0005,
 
-    # v0028 basket harvest: hold 3 live positions, no per-position stops,
+    # v0029 basket harvest: hold 3 live positions, no per-position stops,
     # close only when real/proxy profit target is reached, then immediately refill.
     "basket_harvest_enabled": True,
     "basket_positions": 3,
@@ -172,7 +175,7 @@ DEFAULTS: dict[str, Any] = {
 }
 
 
-BASKET_HARVEST_PROFILE_V0028: dict[str, Any] = {
+BASKET_HARVEST_PROFILE_V0029: dict[str, Any] = {
     # Basket-harvest live mode: 3 small positions, no per-position stops,
     # close only on +$0.01 real/proxy profit and immediately refill the basket.
     "leverage": 5,
@@ -217,7 +220,7 @@ BASKET_HARVEST_PROFILE_V0028: dict[str, Any] = {
     "max_entry_maker_fee_rate": 0.0,
     "max_entry_taker_fee_rate": 0.0,
     "fee_guard_ignore_symbol": True,
-    "trade_profile": "basket_harvest_v0028",
+    "trade_profile": "basket_harvest_v0029",
     "edge_filter_enabled": False,
     "entry_top_imbalance_ratio": 1.15,
     "entry_microprice_min_ticks": 0.10,
@@ -235,9 +238,9 @@ BASKET_HARVEST_PROFILE_V0028: dict[str, Any] = {
 }
 
 # Backwards-compatible import name used by main.py.
-ZERO_FEE_GUARD_PROFILE_V0025 = BASKET_HARVEST_PROFILE_V0028
-ACTIVE_PLUS_PROFILE_V0023 = BASKET_HARVEST_PROFILE_V0028
-EDGE_PLUS_PROFILE_V0027 = BASKET_HARVEST_PROFILE_V0028
+ZERO_FEE_GUARD_PROFILE_V0025 = BASKET_HARVEST_PROFILE_V0029
+ACTIVE_PLUS_PROFILE_V0023 = BASKET_HARVEST_PROFILE_V0029
+EDGE_PLUS_PROFILE_V0027 = BASKET_HARVEST_PROFILE_V0029
 
 
 
