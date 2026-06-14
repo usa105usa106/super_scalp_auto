@@ -1,16 +1,15 @@
-# MEXC Micro Maker v0030 Basket Truth
+# MEXC Micro Maker LIVE v0036
 
-Fixes v0029 panel/counter lie:
-- Live panel now shows NET equity PnL = current USDT equity - start equity.
-- Closed trades PnL is shown separately and is not presented as account profit.
-- If a filled position proves actual non-zero fees via position fee/feeRates, bot aborts that invalid contract and ignores the symbol for the session.
-- USDT-only basket filter remains.
+## v0036 Price Tsunami Fast UI + Stop Pause Fix
 
-Important: no-stop baskets can still hold losers indefinitely. NET equity PnL is the only truth.
+Strategy: price-vote market wave detector. The bot samples prices, counts how many active symbols rose/fell, calculates dominance and 60s acceleration, then opens a 5-position basket in one direction.
 
+Risk modes:
+- Early wave: acceleration >= 15% and dominance >= 65% -> 5x, basket NET TP +0.05 USDT.
+- Normal wave: dominance >= 75% -> 5x, basket NET TP +0.05 USDT.
+- Tsunami: dominance >= 75% and acceleration >= 15% -> 10x, basket NET TP +0.10 USDT.
 
-## v0033 Wave Hunter Safe
-- Подтверждение импульса через лидеров BTC/SOL/ETH.
-- Входы корзины запускаются параллельно, не 3+2 и не по одному с большой задержкой.
-- Контракты с фактической комиссией больше не закрываются мгновенно только из-за fee; цель корзины автоматически поднимается, чтобы покрыть entry/exit fee + чистый буфер.
-- Исправлен scan_symbol_error duplicate bid/ask.
+Operational behavior:
+- Stop = hard pause only. It stops scanner/new entries and does NOT cancel orders or close positions.
+- Close All = full exchange cleanup. It cancels active/limit/plan/stop orders, closes all positions by market, then cancels again.
+- Telegram callbacks answer immediately; slow exchange cleanup runs in background only for Close All.

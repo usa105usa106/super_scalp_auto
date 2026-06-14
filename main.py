@@ -24,6 +24,15 @@ ENGINE: MicroMakerEngine | None = None
 PANEL_LOCK = asyncio.Lock()
 PANEL_UPDATE_TASK: asyncio.Task | None = None
 PROCESS_START_TS = time.time()
+UI_BG_TASKS: set[asyncio.Task] = set()
+
+
+def spawn_ui_task(coro, name: str = "ui_bg") -> asyncio.Task:
+    """Run slow Telegram/API actions outside the callback handler so buttons do not stick."""
+    task = asyncio.create_task(coro, name=name)
+    UI_BG_TASKS.add(task)
+    task.add_done_callback(lambda t: UI_BG_TASKS.discard(t))
+    return task
 
 
 def get_admin_ids() -> set[int]:
@@ -242,7 +251,7 @@ def settings_menu() -> InlineKeyboardMarkup:
         [b("Panel 2s", "set:telegram_live_update_sec:2"), b("Panel 5s", "set:telegram_live_update_sec:5"), b("Panel 10s", "set:telegram_live_update_sec:10"), b("Stopped OFF", "set:telegram_live_stopped_update_sec:0")],
         [b("Dir BOTH", "set:direction_mode:both"), b("LONG", "set:direction_mode:long"), b("SHORT", "set:direction_mode:short")],
         [b("Emergency ON/OFF", "toggle:emergency_market_close"), b("Post-close ON/OFF", "toggle:post_only_close")],
-        [b("🧺 Wave Hunter Safe v0033", "preset:plus"), b("Custom mode", "preset:custom")],
+        [b("🌊 Price Tsunami Fast UI v0036", "preset:plus"), b("Custom mode", "preset:custom")],
         [b("⬅️ Back to Live", "menu:main")],
     ])
 
@@ -435,7 +444,15 @@ async def edit_query_as_panel(q, text: str, reply_markup: InlineKeyboardMarkup, 
             if "Message is not modified" in str(e):
                 await set_panel_identity(q.message.chat_id, q.message.message_id, mode)
                 return
-            raise
+            # Callback UI must never stay stuck because an edit failed/raced with live refresh.
+            log_error("telegram_edit_query_as_panel_bad_request", e, mode=mode)
+            return
+        except TelegramError as e:
+            log_error("telegram_edit_query_as_panel_error", e, mode=mode)
+            return
+        except Exception as e:
+            log_error("telegram_edit_query_as_panel_unexpected", e, mode=mode)
+            return
 
 
 async def update_live_panel(app: Application, force: bool = False) -> None:
@@ -620,7 +637,7 @@ async def preset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     apply_plus_profile()
     engine = await ensure_engine(context, chat_id)
     engine.clear_ignored_symbols()
-    await upsert_panel(context, chat_id, "🧺 Wave Hunter Safe v0033 применён: засада, подтверждённый LONG/SHORT импульс, затем 5 позиций ×20%, динамическая NET-цель с учётом фактической комиссии.\n\n" + settings_text(), settings_menu(), mode="settings")
+    await upsert_panel(context, chat_id, "🧺 Price Tsunami v0036 Fast UI применён: price-vote dominance/acceleration: 5 позиций разом, 5x/10x по силе волны, NET-выход.\n\n" + settings_text(), settings_menu(), mode="settings")
 
 
 async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -945,11 +962,40 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await upsert_panel(context, chat_id, txt, main_menu(), mode="main")
 
 
+async def _finish_panel_task(context: ContextTypes.DEFAULT_TYPE, chat_id: int | None, engine: MicroMakerEngine, text_or_coro, reply_markup: InlineKeyboardMarkup | None = None, mode: str = "main") -> None:
+    """Execute a slow action and refresh panel afterwards. Used so button callbacks answer instantly."""
+    if not chat_id:
+        return
+    try:
+        if asyncio.iscoroutine(text_or_coro):
+            msg = await text_or_coro
+        else:
+            msg = str(text_or_coro)
+        await upsert_panel(context, chat_id, (msg + "\n\n" + panel_text(engine))[:3900], reply_markup or main_menu(), mode=mode)
+    except Exception as e:
+        log_error("telegram_background_panel_task_error", e, mode=mode)
+        try:
+            await upsert_panel(context, chat_id, f"❌ Ошибка фоновой команды: {str(e)[:500]}\n\n" + panel_text(engine), reply_markup or main_menu(), mode=mode)
+        except Exception:
+            pass
+
+
 async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
-    await q.answer()
     data = q.data or ""
     chat_id = q.message.chat_id if q.message else None
+    # Answer first so Telegram button spinner disappears immediately.
+    try:
+        if data == "mm:stop":
+            await q.answer("⏸ Stop принят")
+        elif data == "mm:close_all":
+            await q.answer("❌ Close All запущен")
+        elif data == "mm:start":
+            await q.answer("▶️ Start принят")
+        else:
+            await q.answer()
+    except TelegramError:
+        pass
     engine = await ensure_engine(context, chat_id)
 
     if data == "menu:main":
@@ -965,22 +1011,34 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await edit_query_as_panel(q, api_text(), main_menu(), mode="api")
         return
     if data == "mm:start":
-        msg = await engine.start()
-        await edit_query_as_panel(q, msg + "\n\n" + panel_text(engine), main_menu(), mode="main")
+        await edit_query_as_panel(q, "▶️ Start принят, запускаю цикл...\n\n" + panel_text(engine), main_menu(), mode="main")
+        spawn_ui_task(_finish_panel_task(context, chat_id, engine, engine.start(), main_menu(), mode="main"), name="ui_start_live")
         return
     if data == "mm:stop":
-        msg = await engine.stop(close_positions=False)
-        await edit_query_as_panel(q, msg + "\n\n" + panel_text(engine), main_menu(), mode="main")
+        # Stop is a hard pause only: no order/position cleanup here.
+        engine.running = False
+        STORE.set("live_enabled", False)
+        if engine.task and not engine.task.done():
+            engine.task.cancel()
+        for t in list(engine.active_tasks.values()):
+            if not t.done():
+                t.cancel()
+        engine.active_tasks.clear()
+        await edit_query_as_panel(q, "⏸ Stop принят мгновенно. Скан/новые сделки остановлены. Ордера и позиции НЕ трогаю.\n\n" + panel_text(engine), main_menu(), mode="main")
+        spawn_ui_task(_finish_panel_task(context, chat_id, engine, engine.stop(close_positions=False), main_menu(), mode="main"), name="ui_stop_live")
         return
     if data == "mm:close_all":
-        msg = await engine.close_all()
-        await edit_query_as_panel(q, msg + "\n\n" + panel_text(engine), main_menu(), mode="main")
+        engine.running = False
+        STORE.set("live_enabled", False)
+        await edit_query_as_panel(q, "❌ Close All принят. Закрытие/отмена запущены в фоне...\n\n" + panel_text(engine), main_menu(), mode="main")
+        spawn_ui_task(_finish_panel_task(context, chat_id, engine, engine.close_all(), main_menu(), mode="main"), name="ui_close_all")
         return
     if data == "mm:status":
         await edit_query_as_panel(q, panel_text(engine), main_menu(), mode="main")
         return
     if data == "mm:scan":
-        await edit_query_as_panel(q, await engine.scan_now_text(), symbols_menu(), mode="symbols")
+        await edit_query_as_panel(q, "🔍 Scan Now принят, сканирую в фоне...", symbols_menu(), mode="symbols")
+        spawn_ui_task(_finish_panel_task(context, chat_id, engine, engine.scan_now_text(), symbols_menu(), mode="symbols"), name="ui_scan_now")
         return
     if data == "mm:balance":
         if chat_id:
@@ -990,14 +1048,14 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await edit_query_as_panel(q, engine.trades_counter_text(), main_menu(), mode="main")
         return
     if data == "mm:fees":
-        s = STORE.load()
-        try:
+        async def fee_task():
+            s = STORE.load()
             client = MexcFuturesClient(s.get("mexc_api_key"), s.get("mexc_api_secret"), settings=s)
             await client.sync_time()
             zeros = await client.verified_zero_fee_symbols(int(s.get("max_zero_fee_scan_symbols") or 80))
-            await edit_query_as_panel(q, "🧾 API zero-fee symbols:\n" + (", ".join(zeros) if zeros else "Не нашёл API-подтверждённые zero-fee пары."), main_menu(), mode="api")
-        except Exception as e:
-            await edit_query_as_panel(q, f"❌ Fee check error: {str(e)[:500]}", main_menu(), mode="api")
+            return "🧾 API zero-fee symbols:\n" + (", ".join(zeros) if zeros else "Не нашёл API-подтверждённые zero-fee пары.")
+        await edit_query_as_panel(q, "🧾 Fees принят, проверяю API в фоне...", main_menu(), mode="api")
+        spawn_ui_task(_finish_panel_task(context, chat_id, engine, fee_task(), main_menu(), mode="api"), name="ui_fees")
         return
     if data == "symbols:clear":
         STORE.set("allowed_symbols", "")
@@ -1010,7 +1068,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if data == "preset:plus":
         apply_plus_profile()
         engine.clear_ignored_symbols()
-        await edit_query_as_panel(q, "🧺 Wave Hunter Safe v0033 применён.\n\n" + settings_text(), settings_menu(), mode="settings")
+        await edit_query_as_panel(q, "🧺 Price Tsunami v0036 Fast UI применён.\n\n" + settings_text(), settings_menu(), mode="settings")
         return
     if data == "preset:custom":
         STORE.set("trade_profile", "custom")
@@ -1086,7 +1144,7 @@ def main() -> None:
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN env is missing")
-    app = ApplicationBuilder().token(token).post_init(post_init).post_shutdown(post_shutdown).build()
+    app = ApplicationBuilder().token(token).post_init(post_init).post_shutdown(post_shutdown).concurrent_updates(True).build()
     app.add_handler(CommandHandler("start", admin_guard(start_cmd)))
     app.add_handler(CommandHandler("menu", admin_guard(start_cmd)))
     app.add_handler(CommandHandler("ping", admin_guard(ping_cmd)))

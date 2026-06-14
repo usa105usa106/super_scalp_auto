@@ -66,6 +66,7 @@ class MicroMakerEngine:
         self.wave_candidate_side: str | None = None
         self.wave_candidate_count: int = 0
         self.wave_cooldown_until_ts: float = 0.0
+        self.wave_dominance_history: list[tuple[float, float, float]] = []  # ts, long_dom, short_dom
         log_event("engine_init", version=self._settings().get("bot_version"))
 
     def _log_event(self, event: str, **data: Any) -> None:
@@ -109,7 +110,7 @@ class MicroMakerEngine:
         # indexes and tokenized tickers without this substring remain allowed.
         if "STOCK" in sym:
             return True
-        # v0033: the account balance/margin shown by MEXC is USDT. Contracts like
+        # v0036: the account balance/margin shown by MEXC is USDT. Contracts like
         # SOL_USDC/BTC_USDC require USDC collateral, so MEXC returns
         # "Balance insufficient" with available=0 even when USDT is free.
         # Basket mode must therefore trade only *_USDT contracts by default.
@@ -533,7 +534,7 @@ class MicroMakerEngine:
             self._log_error("start_balance_error", e)
         self.task = asyncio.create_task(self._run_loop(), name="micro_maker_loop")
         self._log_event("start_success", start_equity=self.stats.start_equity)
-        return "▶️ Micro Maker LIVE v0033 запущен. Wave Hunter Safe: засада, общий LONG/SHORT импульс, затем 5 позиций по 20%, закрытие всей корзины по NET+."
+        return "▶️ Micro Maker LIVE v0036 запущен. Wave Price Tsunami Fast UI: price-vote dominance/acceleration, 5 позиций разом, выход по NET+."
 
     async def stop(self, close_positions: bool = False) -> str:
         self._log_event("stop_requested", close_positions=close_positions, active_tasks=list(self.active_tasks.keys()))
@@ -546,23 +547,23 @@ class MicroMakerEngine:
         self.stats.open_position_symbols.clear()
         if self.task and not self.task.done():
             self.task.cancel()
-        client = self.client
-        if client:
-            try:
-                if close_positions:
+        # STOP is a hard PAUSE only. It must not touch exchange orders or positions.
+        # Full exchange cleanup is reserved for Close All.
+        if close_positions:
+            client = self.client
+            if client:
+                try:
                     s = self._settings()
                     await client.hard_close_all(leverage=int(s.get("leverage") or 5), open_type=int(s.get("open_type") or 1))
-                else:
-                    await client.cancel_all_orders(None)
-            except Exception as e:
-                self.stats.last_error = str(e)[:240]
-                self._log_error("stop_cleanup_error", e, close_positions=close_positions)
-        await self._stop_market_ws()
-        if close_positions:
+                except Exception as e:
+                    self.stats.last_error = str(e)[:240]
+                    self._log_error("stop_cleanup_error", e, close_positions=close_positions)
+            await self._stop_market_ws()
             self._log_event("stop_done", close_positions=True)
             return "🚨 Risk Stop: позиции закрыты market + ордера отменены."
+        await self._stop_market_ws()
         self._log_event("stop_done", close_positions=False)
-        return "⏸ Stop: торговля и фоновый скан остановлены. Активные ордера отменены, позиции market не закрывались."
+        return "⏸ Stop: скан и новые сделки поставлены на жёсткую паузу. Ордера и позиции на бирже НЕ тронуты."
 
     async def close_all(self) -> str:
         """Stop strategy, cancel all active/limit orders and close every open position by market."""
@@ -627,7 +628,7 @@ class MicroMakerEngine:
         cooldown_left = max(0.0, self.cooldown_until_ts - time.time())
         cooldown_txt = f" | Cooldown: {cooldown_left:.0f}s" if cooldown_left > 0 else ""
         return (
-            f"🤖 MEXC Micro Maker LIVE {s.get('bot_version', 'v0033')}\n"
+            f"🤖 MEXC Micro Maker LIVE {s.get('bot_version', 'v0036')}\n"
             f"State: {state} | Updated: {last_update}{cooldown_txt}\n"
             f"Uptime: {h:02d}:{m:02d}:{sec:02d}\n\n"
             f"⚙️ {s.get('leverage')}x | Size: {s.get('position_margin_percent', 10)}% total | "
@@ -689,7 +690,7 @@ class MicroMakerEngine:
             "📊 Micro Maker Status\n\n"
             f"State: {'RUNNING' if self.is_running() else 'STOPPED'}\n"
             f"Active tasks: {len(self.active_tasks)} | Current: {', '.join(self.stats.current_symbols) or '-'}\n"
-            f"Version: {s.get('bot_version', 'v0033')}\n"
+            f"Version: {s.get('bot_version', 'v0036')}\n"
             f"Leverage: {s.get('leverage')}x | One trade size: {s.get('position_margin_percent', 10)}% of TOTAL USDT equity\n"
             f"Max positions: {s.get('max_positions')} | Symbols limit: {s.get('symbols_limit')}\n"
             f"Scanner: {'AUTO' if s.get('auto_select_symbols') else 'MANUAL'} | ZeroFee: {'ON' if s.get('only_zero_fee') else 'OFF'} | scan age: {age:.1f}s | rescan: {s.get('zero_fee_rescan_sec')}s\n"
@@ -751,7 +752,7 @@ class MicroMakerEngine:
 
     async def _run_loop(self) -> None:
         self._log_event("run_loop_started")
-        await self._notify("✅ LIVE loop v0033 started. Wave Hunter Safe: ждём общий импульс рынка, затем открываем 5 LONG или 5 SHORT разом и закрываем корзину по NET+.")
+        await self._notify("✅ LIVE loop v0036 started. Wave Price Tsunami Fast UI: каждые 10с считаю рост/падение всего рынка, ловлю dominance/acceleration и открываю 5 монет корзиной.")
         while self.running:
             try:
                 s = self._settings()
@@ -978,7 +979,7 @@ class MicroMakerEngine:
                 if not bias:
                     try:
                         em = await self._edge_metrics(sym, s, book)
-                        # v0033: avoid TypeError from duplicate bid/ask/depth keys
+                        # v0036: avoid TypeError from duplicate bid/ask/depth keys
                         # when edge metrics are merged into scan detail.
                         for _k in ("bid", "ask", "spread_ticks", "depth_bid", "depth_ask", "depth_min", "imbalance", "source"):
                             em.pop(_k, None)
@@ -1008,7 +1009,10 @@ class MicroMakerEngine:
                 except Exception:
                     em, top_score, micro_score = {}, 0.0, 0.0
                 move_ticks, move_age = self._recent_move_ticks(sym, float(s.get("wave_lookback_sec") or s.get("basket_rebound_lookback_sec") or 20.0), tick)
-                wave_score = min(abs(float(move_ticks or 0.0)) * 2.0, 18.0) if bool(s.get("wave_basket_enabled", False)) else 0.0
+                move_pct, move_pct_age = self._recent_move_pct(sym, float(s.get("wave_price_lookback_sec") or s.get("wave_lookback_sec") or 10.0))
+                # v0036: score is no longer the market-direction source. Keep it only
+                # as secondary display/ranking; the wave detector uses move_pct votes.
+                wave_score = min(abs(float(move_pct or 0.0)) * 120.0, 30.0) if bool(s.get("wave_basket_enabled", False)) else 0.0
                 score = depth_score + spread_score + imbalance_score + volume_score + top_score + micro_score + wave_score
                 scored.append({
                     "symbol": sym,
@@ -1028,6 +1032,8 @@ class MicroMakerEngine:
                     "micro_ticks": em.get("micro_ticks"),
                     "move_ticks": move_ticks,
                     "move_age": move_age,
+                    "move_pct": move_pct,
+                    "move_pct_age": move_pct_age,
                     "source": book.get("source", "rest"),
                 })
                 add_scan_detail(sym, "valid", score=score, bias=bias, bid=bid, ask=ask, spread_ticks=spread_ticks, depth_min=depth_min, required_depth=required_depth, imbalance=imbalance, quote_volume=quote_volume, source=book.get("source", "rest"))
@@ -1156,6 +1162,34 @@ class MicroMakerEngine:
             return None, age
         return (float(cur[1]) - float(old[1])) / max(float(tick), 1e-12), age
 
+    def _recent_move_pct(self, symbol: str, lookback_sec: float) -> tuple[float | None, float]:
+        """Return mid-price percent move over lookback window, plus sample age.
+
+        v0036 Wave Price Tsunami Fast UI deliberately uses this simple fact instead of
+        internal score: price now versus price N seconds ago.
+        """
+        sid = MexcFuturesClient.contract_id(symbol)
+        arr = self.mid_history.get(sid) or []
+        if len(arr) < 2:
+            return None, 0.0
+        now = time.time()
+        target_ts = now - max(1.0, float(lookback_sec or 1.0))
+        old = arr[0]
+        for row in arr:
+            if row[0] <= target_ts:
+                old = row
+            else:
+                break
+        cur = arr[-1]
+        age = cur[0] - old[0]
+        if age < max(1.0, float(lookback_sec or 1.0) * 0.55):
+            return None, age
+        old_px = float(old[1])
+        cur_px = float(cur[1])
+        if old_px <= 0:
+            return None, age
+        return ((cur_px - old_px) / old_px) * 100.0, age
+
     def _wave_leader_counts(self, s: dict[str, Any]) -> dict[str, Any]:
         """Fast market-direction check using leaders, not trade candidates.
 
@@ -1223,101 +1257,39 @@ class MicroMakerEngine:
         else:
             forced = None
 
-        # v0033 Wave Hunter Safe: trend-following basket entries.
-        # A single coin is allowed only when its recent move supports the global wave side.
-        # The run loop opens the whole basket only after enough coins point to the same side.
-        if bool(s.get("wave_basket_enabled", False)):
+        # v0036 Wave Price Tsunami Fast UI: market direction is not taken from the old
+        # book score. A coin votes LONG when its mid-price rose over the price
+        # lookback, SHORT when it fell. This makes the wave detector transparent:
+        # count rose/fell coins every ~10 seconds, then fire the basket.
+        if bool(s.get("wave_basket_enabled", False)) and bool(s.get("wave_price_vote_enabled", True)):
             try:
-                m0 = await self._edge_metrics(symbol, s, book)
-                lookback = float(s.get("wave_lookback_sec") or 20.0)
-                min_move = float(s.get("wave_min_move_ticks") or 2.0)
-                move_ticks, sample_age = self._recent_move_ticks(symbol, lookback, float(m0.get("tick") or 0.0))
-                if move_ticks is None:
-                    self._log_debug("wave_wait_history", symbol=symbol, sample_age=sample_age, lookback=lookback)
+                lookback = float(s.get("wave_price_lookback_sec") or s.get("wave_lookback_sec") or 10.0)
+                min_pct = max(0.0, float(s.get("wave_price_min_move_pct") or 0.0))
+                move_pct, sample_age = self._recent_move_pct(symbol, lookback)
+                if move_pct is None:
+                    self._log_debug("wave_price_wait_history", symbol=symbol, sample_age=sample_age, lookback=lookback)
                     return None
-                depth_ratio = float(s.get("min_imbalance_ratio") or 1.03)
-                top_ratio = float(s.get("wave_entry_top_ratio") or 1.05)
-                micro_min = float(s.get("wave_entry_micro_ticks") or 0.0)
-                quality_need = max(1, int(s.get("wave_quality_score_required") or 2))
-                db = float(m0.get("depth_bid") or 0.0)
-                da = float(m0.get("depth_ask") or 0.0)
-                bt = float(m0.get("bid_top") or 0.0)
-                at = float(m0.get("ask_top") or 0.0)
-                micro = float(m0.get("micro_ticks") or 0.0)
-                long_score = int(db >= da * depth_ratio) + int(bt >= at * top_ratio) + int(micro >= micro_min)
-                short_score = int(da >= db * depth_ratio) + int(at >= bt * top_ratio) + int(micro <= -micro_min)
-                long_ok = move_ticks >= min_move and long_score >= quality_need
-                short_ok = move_ticks <= -min_move and short_score >= quality_need
                 if forced == "long":
-                    return "long" if long_ok else None
+                    return "long" if move_pct >= min_pct else None
                 if forced == "short":
-                    return "short" if short_ok else None
-                if long_ok and not short_ok:
+                    return "short" if move_pct <= -min_pct else None
+                if move_pct >= min_pct:
                     return "long"
-                if short_ok and not long_ok:
+                if move_pct <= -min_pct:
                     return "short"
-                if long_ok and short_ok:
-                    return "long" if move_ticks > 0 else "short"
-                self._log_debug("wave_direction_reject", symbol=symbol, move_ticks=move_ticks, sample_age=sample_age, long_score=long_score, short_score=short_score, depth_bid=db, depth_ask=da, bid_top=bt, ask_top=at, micro_ticks=micro)
+                self._log_debug("wave_price_neutral", symbol=symbol, move_pct=move_pct, sample_age=sample_age, min_pct=min_pct)
                 return None
             except Exception as e:
-                self._log_error("wave_direction_error", e, symbol=symbol)
+                self._log_error("wave_price_direction_error", e, symbol=symbol)
                 return None
 
-        # v0033 Wave Hunter Safe: no random entries. Enter only after a short
-        # impulse and only in the rebound direction, confirmed by top-book support
-        # and microprice. This keeps the 3-position basket idea, but avoids opening
-        # positions that can sit underwater for hours after trend-following fills.
-        if bool(s.get("basket_harvest_enabled", False)):
-            try:
-                m0 = await self._edge_metrics(symbol, s, book)
-                lookback = float(s.get("basket_rebound_lookback_sec") or 25.0)
-                min_move = float(s.get("basket_rebound_min_move_ticks") or 3.0)
-                move_ticks, sample_age = self._recent_move_ticks(symbol, lookback, float(m0.get("tick") or 0.0))
-                if move_ticks is None:
-                    self._log_debug("basket_rebound_wait_history", symbol=symbol, sample_age=sample_age, lookback=lookback)
-                    return None
-                depth_ratio = float(s.get("min_imbalance_ratio") or 1.03)
-                top_ratio = float(s.get("basket_rebound_confirm_top_ratio") or s.get("entry_top_imbalance_ratio") or 1.15)
-                micro_min = float(s.get("basket_rebound_confirm_micro_ticks") or s.get("entry_microprice_min_ticks") or 0.05)
-                db = float(m0.get("depth_bid") or 0.0)
-                da = float(m0.get("depth_ask") or 0.0)
-                bt = float(m0.get("bid_top") or 0.0)
-                at = float(m0.get("ask_top") or 0.0)
-                micro = float(m0.get("micro_ticks") or 0.0)
-                long_score = int(db >= da * depth_ratio) + int(bt >= at * top_ratio) + int(micro >= micro_min)
-                short_score = int(da >= db * depth_ratio) + int(at >= bt * top_ratio) + int(micro <= -micro_min)
-                long_ok = move_ticks <= -min_move and long_score >= 2
-                short_ok = move_ticks >= min_move and short_score >= 2
-                if forced == "long":
-                    return "long" if long_ok else None
-                if forced == "short":
-                    return "short" if short_ok else None
-                if long_ok:
-                    return "long"
-                if short_ok:
-                    return "short"
-                self._log_debug("basket_rebound_direction_reject", symbol=symbol, move_ticks=move_ticks, sample_age=sample_age, long_score=long_score, short_score=short_score, depth_bid=db, depth_ask=da, bid_top=bt, ask_top=at, micro_ticks=micro)
-                return None
-            except Exception as e:
-                self._log_error("basket_rebound_direction_error", e, symbol=symbol)
-                return None
-
+        # Legacy edge/basket logic kept as fallback when wave_price_vote_enabled is off.
         m = await self._edge_metrics(symbol, s, book)
         ratio = float(s.get("min_imbalance_ratio") or 1.04)
         top_ratio = float(s.get("entry_top_imbalance_ratio") or 1.0)
         micro_min = float(s.get("entry_microprice_min_ticks") or 0.0)
-
-        long_ok = (
-            m["depth_bid"] >= m["depth_ask"] * ratio
-            and m["bid_top"] >= m["ask_top"] * top_ratio
-            and m["micro_ticks"] >= micro_min
-        )
-        short_ok = (
-            m["depth_ask"] >= m["depth_bid"] * ratio
-            and m["ask_top"] >= m["bid_top"] * top_ratio
-            and m["micro_ticks"] <= -micro_min
-        )
+        long_ok = (m["depth_bid"] >= m["depth_ask"] * ratio and m["bid_top"] >= m["ask_top"] * top_ratio and m["micro_ticks"] >= micro_min)
+        short_ok = (m["depth_ask"] >= m["depth_bid"] * ratio and m["ask_top"] >= m["bid_top"] * top_ratio and m["micro_ticks"] <= -micro_min)
         if forced == "long":
             return "long" if long_ok or not bool(s.get("edge_filter_enabled", True)) else None
         if forced == "short":
@@ -1377,43 +1349,87 @@ class MicroMakerEngine:
 
 
     def _detect_wave_signal(self, rows: list[dict[str, Any]], s: dict[str, Any]) -> tuple[str | None, list[dict[str, Any]], dict[str, Any]]:
-        """Return a market-wide wave side and the best rows for that side.
+        """Detect v0036 price-vote market wave and choose basket rows.
 
-        This is the v0033 ambush: do not open one-by-one. Wait until enough
-        candidates in the scanned universe point to the same LONG/SHORT impulse,
-        then fire the basket immediately.
+        Direction is decided by the whole scanned market: how many valid active
+        coins rose or fell over the price lookback. Acceleration is the change
+        in that dominance over the acceleration lookback. No old score/microprice
+        logic is used to decide LONG/SHORT.
         """
         now = time.time()
-        usable = [r for r in rows if r.get("bias") in {"long", "short"}]
         need = max(1, int(s.get("wave_positions") or s.get("max_positions") or 5))
-        min_candidates = max(1, int(s.get("wave_min_candidates") or need))
-        min_ratio = max(0.1, min(1.0, float(s.get("wave_min_side_ratio") or 0.60)))
+        normal_ratio = max(0.1, min(1.0, float(s.get("wave_min_side_ratio") or 0.75)))
+        early_ratio = max(0.1, min(1.0, float(s.get("wave_early_min_side_ratio") or 0.65)))
+        accel_trigger = max(0.0, float(s.get("wave_accel_trigger_pct") or 15.0) / 100.0)
+        accel_lookback = max(5.0, float(s.get("wave_accel_lookback_sec") or 60.0))
+
+        usable = [r for r in rows if r.get("bias") in {"long", "short"} and r.get("move_pct") is not None]
         if not usable:
             self.wave_candidate_side = None
             self.wave_candidate_count = 0
-            return None, [], {"reason": "no_wave_candidates", "usable": 0}
+            return None, [], {"reason": "no_price_vote_candidates", "usable": 0}
+
         longs = [r for r in usable if r.get("bias") == "long"]
         shorts = [r for r in usable if r.get("bias") == "short"]
-        side = "long" if len(longs) >= len(shorts) else "short"
+        total = max(1, len(longs) + len(shorts))
+        long_dom = len(longs) / total
+        short_dom = len(shorts) / total
+        side = "long" if long_dom >= short_dom else "short"
+        dominance = long_dom if side == "long" else short_dom
         side_rows = longs if side == "long" else shorts
-        ratio = len(side_rows) / max(len(usable), 1)
+
+        # Maintain a compact 60s history for acceleration. Use the oldest sample
+        # at/older than the lookback when possible, otherwise the oldest available.
+        self.wave_dominance_history.append((now, long_dom, short_dom))
+        cutoff = now - max(accel_lookback * 3.0, 180.0)
+        self.wave_dominance_history = [x for x in self.wave_dominance_history[-600:] if x[0] >= cutoff]
+        old = self.wave_dominance_history[0]
+        target_ts = now - accel_lookback
+        for row in self.wave_dominance_history:
+            if row[0] <= target_ts:
+                old = row
+            else:
+                break
+        old_long, old_short = float(old[1]), float(old[2])
+        accel_long = long_dom - old_long
+        accel_short = short_dom - old_short
+        accel = accel_long if side == "long" else accel_short
+
+        is_normal = dominance >= normal_ratio
+        is_early = dominance >= early_ratio and accel >= accel_trigger
+        is_tsunami = is_normal and accel >= accel_trigger
+        mode = "tsunami" if is_tsunami else ("normal" if is_normal else ("early" if is_early else "wait"))
+
         details = {
             "usable": len(usable),
             "long": len(longs),
             "short": len(shorts),
             "side": side,
-            "ratio": ratio,
+            "dominance": dominance,
+            "long_dominance": long_dom,
+            "short_dominance": short_dom,
+            "acceleration": accel,
+            "long_acceleration": accel_long,
+            "short_acceleration": accel_short,
+            "normal_ratio": normal_ratio,
+            "early_ratio": early_ratio,
+            "accel_trigger": accel_trigger,
+            "mode": mode,
             "need": need,
-            "min_candidates": min_candidates,
-            "min_ratio": min_ratio,
         }
-        if len(side_rows) < min_candidates or ratio < min_ratio:
+        if mode == "wait":
             self.wave_candidate_side = None
             self.wave_candidate_count = 0
-            details["reason"] = "weak_market_consensus"
+            details["reason"] = "price_wave_not_ready"
             return None, [], details
+        if len(side_rows) < need:
+            self.wave_candidate_side = None
+            self.wave_candidate_count = 0
+            details["reason"] = "not_enough_direction_rows"
+            return None, [], details
+
         confirm_need = max(1, int(s.get("wave_entry_confirmations") or 1))
-        if self.wave_candidate_side == side and now - self.wave_cooldown_until_ts >= 0:
+        if self.wave_candidate_side == side and now >= self.wave_cooldown_until_ts:
             self.wave_candidate_count += 1
         else:
             self.wave_candidate_side = side
@@ -1424,22 +1440,35 @@ class MicroMakerEngine:
             details["reason"] = "confirming"
             return None, [], details
 
-        if bool(s.get("wave_require_leader_confirmation", True)):
-            leaders = self._wave_leader_counts(s)
-            details["leaders"] = leaders
-            min_leaders = max(0, int(s.get("wave_min_leader_confirm") or 1))
-            max_opp = max(0, int(s.get("wave_max_opposite_leaders") or 0))
-            if side == "long":
-                if int(leaders.get("long") or 0) < min_leaders or int(leaders.get("short") or 0) > max_opp:
-                    details["reason"] = "leader_not_confirmed"
-                    return None, [], details
-            else:
-                if int(leaders.get("short") or 0) < min_leaders or int(leaders.get("long") or 0) > max_opp:
-                    details["reason"] = "leader_not_confirmed"
-                    return None, [], details
+        # Choose middle slice of the winning direction, not the most overheated
+        # leaders and not the dead laggards. Percent range is configurable.
+        sorted_side = sorted(side_rows, key=lambda r: abs(float(r.get("move_pct") or 0.0)), reverse=True)
+        n = len(sorted_side)
+        start_pct = max(0.0, min(0.95, float(s.get("wave_pick_start_pct") or 0.25)))
+        end_pct = max(start_pct + 0.01, min(1.0, float(s.get("wave_pick_end_pct") or 0.60)))
+        start_i = min(n - 1, int(n * start_pct))
+        end_i = max(start_i + need, int(n * end_pct))
+        middle = sorted_side[start_i:min(n, end_i)]
+        picked = middle[:need]
+        if len(picked) < need:
+            # Fallback: fill from remaining direction rows, still avoiding duplicates.
+            have = {r.get("symbol") for r in picked}
+            for r in sorted_side:
+                if r.get("symbol") not in have:
+                    picked.append(r)
+                    have.add(r.get("symbol"))
+                if len(picked) >= need:
+                    break
+        if len(picked) < need:
+            details["reason"] = "not_enough_picks_after_middle_slice"
+            return None, [], details
 
-        # Prefer best-scored coins, but also require the same side.
-        picked = sorted(side_rows, key=lambda r: float(r.get("score") or 0.0), reverse=True)[:need]
+        details["pick_start_pct"] = start_pct
+        details["pick_end_pct"] = end_pct
+        details["pick_pool_size"] = n
+        details["selected"] = [r.get("symbol") for r in picked]
+        details["cycle_leverage"] = int(s.get("wave_tsunami_leverage") or 10) if is_tsunami else int(s.get("wave_normal_leverage") or 5)
+        details["cycle_target"] = float(s.get("wave_tsunami_target_profit_usdt") or 0.10) if is_tsunami else float(s.get("wave_normal_target_profit_usdt") or s.get("wave_target_profit_usdt") or 0.05)
         return side, picked, details
 
     async def _wave_loop_tick(self, s: dict[str, Any]) -> None:
@@ -1466,14 +1495,14 @@ class MicroMakerEngine:
         self._log_debug("wave_signal_check", **details, picks=[r.get("symbol") for r in picks])
         if not side:
             reason = details.get("reason") or "waiting"
-            self.stats.last_action = f"wave wait: {reason} L/S={details.get('long', 0)}/{details.get('short', 0)}"
+            self.stats.last_action = f"wave wait: {reason} L/S={details.get('long', 0)}/{details.get('short', 0)} dom={float(details.get('dominance') or 0):.1%} acc={float(details.get('acceleration') or 0):+.1%}"
             return
         key = f"WAVE_{side.upper()}"
         self.stats.current_symbols = [r.get("symbol") for r in picks]
-        self.stats.last_action = f"WAVE {side.upper()} FIRE: {', '.join(self.stats.current_symbols[:8])}"
+        self.stats.last_action = f"WAVE {side.upper()} {details.get('mode','wave').upper()} FIRE: {', '.join(self.stats.current_symbols[:8])}"
         self._log_event("wave_fire", side=side, picks=picks, details=details)
-        await self._notify(f"🚀 WAVE {side.upper()}: открываю корзину {len(picks)} монет разом: " + ", ".join(self.stats.current_symbols[:10]))
-        self.active_tasks[key] = asyncio.create_task(self._wave_basket_cycle(side, picks), name=key)
+        await self._notify(f"🚀 WAVE {side.upper()} {str(details.get('mode','wave')).upper()}: открываю {len(picks)} монет разом | dom={float(details.get('dominance') or 0):.1%} acc={float(details.get('acceleration') or 0):+.1%} | lev={details.get('cycle_leverage')}x TP=${float(details.get('cycle_target') or 0):.3f}: " + ", ".join(self.stats.current_symbols[:10]))
+        self.active_tasks[key] = asyncio.create_task(self._wave_basket_cycle(side, picks, details), name=key)
         # Reset confirmation so the next cycle must see a fresh wave.
         self.wave_candidate_side = None
         self.wave_candidate_count = 0
@@ -1609,9 +1638,16 @@ class MicroMakerEngine:
         self._log_event("wave_close_done", result=res)
         return res
 
-    async def _wave_basket_cycle(self, side: str, rows: list[dict[str, Any]]) -> None:
+    async def _wave_basket_cycle(self, side: str, rows: list[dict[str, Any]], signal: dict[str, Any] | None = None) -> None:
         client = await self._ensure_client()
-        s = self._settings()
+        s0 = self._settings()
+        signal = signal or {}
+        # Per-cycle settings: normal/early = 5x + $0.05, tsunami = 10x + $0.10.
+        s = dict(s0)
+        if signal.get("cycle_leverage"):
+            s["leverage"] = int(signal.get("cycle_leverage"))
+        if signal.get("cycle_target"):
+            s["wave_target_profit_usdt"] = float(signal.get("cycle_target"))
         symbols = [MexcFuturesClient.contract_id(r.get("symbol")) for r in rows if r.get("symbol")]
         target = max(0.0001, float(s.get("wave_target_profit_usdt") or 0.05))
         min_take = max(0.0, float(s.get("wave_min_take_profit_usdt") or 0.03))
@@ -1624,11 +1660,11 @@ class MicroMakerEngine:
         equity_before = await self._read_usdt_total(client) if bool(s.get("real_pnl_enabled", True)) else None
         opened: list[dict[str, Any]] = []
         started = time.time()
-        self._log_event("wave_cycle_start", side=side, symbols=symbols, target=target, equity_before=equity_before)
+        self._log_event("wave_cycle_start", side=side, symbols=symbols, target=target, leverage=s.get("leverage"), signal=signal, equity_before=equity_before)
         wave_slots = int(s.get("wave_positions") or 5)
         order_symbols = symbols[:wave_slots]
         if bool(s.get("wave_parallel_open", True)):
-            # v0033: fire the basket together. v0032 opened sequentially and waited
+            # v0036: fire the basket together. v0032 opened sequentially and waited
             # after every symbol; by the last symbol the impulse could already be gone.
             tasks = [asyncio.create_task(self._open_wave_position(sym, side, s, equity_before), name=f"wave_open_{sym}") for sym in order_symbols]
             for task in asyncio.as_completed(tasks):
@@ -1660,7 +1696,7 @@ class MicroMakerEngine:
         if len(opened) < min_filled:
             self._log_event("wave_cycle_underfilled", filled=len(opened), min_filled=min_filled, symbols=[p.get("symbol") for p in opened])
 
-        # v0033: if MEXC charged real fees despite the zero-fee universe, do not
+        # v0036: if MEXC charged real fees despite the zero-fee universe, do not
         # instantly kill the position. Instead raise the basket NET target so the
         # cycle only closes after fees + a real profit buffer are covered.
         entry_fee_sum = sum(self._position_fee_usdt(p) for p in opened)
@@ -1672,7 +1708,7 @@ class MicroMakerEngine:
             target = max(target, fee_target)
             min_take = max(min_take, target * 0.60)
             self._log_event("wave_fee_adjusted_target", entry_fee_sum=entry_fee_sum, old_target=old_target, target=target, min_take=min_take, opened=[p.get("symbol") for p in opened])
-        await self._notify(f"✅ WAVE {side.upper()} FILLED: {', '.join([p.get('symbol') for p in opened])}. Жду NET +${target:.3f}.")
+        await self._notify(f"✅ WAVE {side.upper()} {str(signal.get('mode','wave')).upper()} FILLED: {', '.join([p.get('symbol') for p in opened])}. Жду NET +${target:.3f}, lev={s.get('leverage')}x.")
         peak_net = -999.0
         reason = "running"
         close_sent = False
@@ -1905,7 +1941,7 @@ class MicroMakerEngine:
         await self._manage_position(symbol, direction, pos, s, equity_before=equity_before)
 
     async def _manage_basket_position(self, symbol: str, direction: str, pos: dict[str, Any], s: dict[str, Any], equity_before: float | None = None) -> None:
-        """v0033 Wave Hunter Safe manager.
+        """v0036 Wave Price Tsunami Fast UI manager.
 
         No per-position stop. A position is closed only with a maker close order
         when the configured positive basket target is reachable. After the task
@@ -1977,7 +2013,7 @@ class MicroMakerEngine:
             active_target_ticks = max(1, int(math.ceil(active_target_usdt / max(tick_value, 1e-12))))
             target_price = entry + active_target_ticks * tick if direction == "long" else entry - active_target_ticks * tick
 
-            # v0033 rotation: after the stale timeout, stop waiting for +$0.01.
+            # v0036 rotation: after the stale timeout, stop waiting for +$0.01.
             # The close order is downgraded to breakeven/small-profit so the slot can
             # rotate into a better coin. This is not a stop; it does not cross a loss.
             if direction == "long":
