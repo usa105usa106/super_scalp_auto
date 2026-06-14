@@ -24,14 +24,32 @@ ENGINE: MicroMakerEngine | None = None
 PANEL_LOCK = asyncio.Lock()
 PANEL_UPDATE_TASK: asyncio.Task | None = None
 PROCESS_START_TS = time.time()
-UI_BG_TASKS: set[asyncio.Task] = set()
+UI_BG_TASKS: dict[str, asyncio.Task] = {}
 
 
 def spawn_ui_task(coro, name: str = "ui_bg") -> asyncio.Task:
-    """Run slow Telegram/API actions outside the callback handler so buttons do not stick."""
+    """Run slow Telegram/API actions outside the callback handler so buttons do not stick.
+
+    v0055: one background UI task per action name. Repeated button taps must not
+    stack duplicate scans/fee checks/close-all operations in the background.
+    If the same action is already running, keep it and close the unused coroutine.
+    """
+    existing = UI_BG_TASKS.get(name)
+    if existing and not existing.done():
+        try:
+            if hasattr(coro, "close"):
+                coro.close()
+        except Exception:
+            pass
+        return existing
     task = asyncio.create_task(coro, name=name)
-    UI_BG_TASKS.add(task)
-    task.add_done_callback(lambda t: UI_BG_TASKS.discard(t))
+    UI_BG_TASKS[name] = task
+
+    def _cleanup(t: asyncio.Task, task_name: str = name) -> None:
+        if UI_BG_TASKS.get(task_name) is t:
+            UI_BG_TASKS.pop(task_name, None)
+
+    task.add_done_callback(_cleanup)
     return task
 
 
@@ -210,10 +228,13 @@ def ping_text(update: Update | None = None, started_perf: float | None = None) -
 def settings_text() -> str:
     s = STORE.load()
     return (
-        f"⚙️ Price Tsunami Settings ({s.get('bot_version', 'v0049')})\n\n"
-        f"Active scan: ALL zero-fee *_USDT монеты | lookback {s.get('wave_price_lookback_sec')}s | WS ALL symbols\n"
-        f"Votes: price up = LONG, price down = SHORT, flat/no fresh price = NEUTRAL\n"
-        f"Denominator: проценты считаются от всего выбранного universe; монеты без свежей цены не выкидываются, а идут в NEUTRAL.\n"
+        f"⚙️ Price Tsunami Settings ({s.get('bot_version', 'v0055')})\n\n"
+        f"Signal mode: {s.get('wave_market_signal_mode', 'all_zero_total')}\n"
+        f"all_zero_total: рынок считает весь zero-fee trade universe.\n"
+        f"top10_leaders: рынок считают TOP10 ликвидных non-stable zero-fee, входы всё равно из полного zero-fee universe.\n"
+        f"Votes: price up = LONG, price down = SHORT, flat/no fresh price = NEUTRAL | lookback {s.get('wave_price_lookback_sec')}s\n"
+        f"Denominator: проценты считаются от выбранного signal universe; без свежей цены = NEUTRAL.\n"
+        f"TOP10 rules: 7/10 = NORMAL, 7/10 + рост +2 монеты за 60с = EARLY, 8/10 = TSUNAMI.\n"
         f"Early Wave: текущие >= {float(s.get('wave_early_min_side_ratio') or 0.65):.0%} и эта же сторона выросла на +{float(s.get('wave_accel_trigger_pct') or 15):.0f}п.п. за {float(s.get('wave_accel_lookback_sec') or 60):.0f}s → 5 сделок, 5x, NET +${float(s.get('wave_normal_target_profit_usdt') or 0.05):.2f}\n"
         f"Normal Wave: текущие >= {float(s.get('wave_min_side_ratio') or 0.75):.0%} → 5 сделок, 5x, NET +${float(s.get('wave_normal_target_profit_usdt') or 0.05):.2f}\n"
         f"Tsunami: текущие >= {float(s.get('wave_min_side_ratio') or 0.75):.0%} и эта же сторона выросла на +{float(s.get('wave_accel_trigger_pct') or 15):.0f}п.п. → 5 сделок, 10x, NET +${float(s.get('wave_tsunami_target_profit_usdt') or 0.10):.2f}\n"
@@ -232,6 +253,8 @@ def settings_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [b(("✅ " if s.get('wave_normal_leverage') == 5 else "") + "5x normal", "set:wave_normal_leverage:5"), b(("✅ " if s.get('wave_tsunami_leverage') == 10 else "") + "10x tsunami", "set:wave_tsunami_leverage:10")],
         [b("✅ Basket 5", "set:wave_positions:5"), b("Scan ALL", "set:max_zero_fee_scan_symbols:0"), b("WS ALL", "set:ws_depth_max_symbols:0")],
+        [b(("✅ " if s.get('wave_market_signal_mode') == 'all_zero_total' else "") + "Signal ALL", "set:wave_market_signal_mode:all_zero_total"), b(("✅ " if s.get('wave_market_signal_mode') == 'top10_leaders' else "") + "Signal TOP10", "set:wave_market_signal_mode:top10_leaders")],
+        [b("TOP10 7/10", "set:wave_top10_normal_count:7"), b("TSUNAMI 8/10", "set:wave_top10_tsunami_count:8"), b("Accel +2", "set:wave_top10_accel_count:2")],
         [b("Early 65%", "set:wave_early_min_side_ratio:0.65"), b("Normal 75%", "set:wave_min_side_ratio:0.75"), b("Ускор. 15п.п.", "set:wave_accel_trigger_pct:15")],
         [b("Hold 4/5", "set:wave_signal_hold_required:4"), b("Hold 5 checks", "set:wave_signal_hold_checks:5"), b("Hold 10s", "set:wave_signal_hold_sec:10")],
         [
@@ -244,43 +267,98 @@ def settings_menu() -> InlineKeyboardMarkup:
         [b("Panel 2s", "set:telegram_live_update_sec:2"), b("Panel 5s", "set:telegram_live_update_sec:5"), b("Panel 10s", "set:telegram_live_update_sec:10"), b("Stopped OFF", "set:telegram_live_stopped_update_sec:0")],
         [b("Dir BOTH", "set:direction_mode:both"), b("LONG", "set:direction_mode:long"), b("SHORT", "set:direction_mode:short")],
         [b("Emergency ON/OFF", "toggle:emergency_market_close"), b("Post-close ON/OFF", "toggle:post_only_close")],
-        [b("🌊 Price Tsunami Basket v0049", "preset:plus"), b("Custom mode", "preset:custom")],
+        [b("🌊 Price Tsunami Basket v0055", "preset:plus"), b("Custom mode", "preset:custom")],
         [b("⬅️ Back to Live", "menu:main")],
     ])
 
 
-def symbols_text() -> str:
+def symbols_text(engine: MicroMakerEngine | None = None) -> str:
+    """Clean Symbols screen.
+
+    v0055: show what matters first: raw zero-fee count, blocked count,
+    ignored count, trade universe, and current scan readiness. Long explanatory
+    text is removed from the main Telegram card.
+    """
     s = STORE.load()
     syms = parse_symbols(str(s.get("allowed_symbols") or ""))
-    allowed = ", ".join(syms) if syms else "FULL AUTO: все API-confirmed zero-fee пары"
+    whitelist_txt = "ON — " + ", ".join(syms) if syms else "OFF — FULL AUTO"
     ignored = s.get("ignored_symbols") or {}
-    ignored_count = len(ignored) if isinstance(ignored, dict) else 0
-    universe_limit = int(s.get("zero_fee_universe_max_symbols") or 0)
-    universe_txt = "ALL" if universe_limit <= 0 else str(universe_limit)
+    stored_ignored_count = len(ignored) if isinstance(ignored, dict) else 0
+
+    raw_total = blocked_total = ignored_total = trade_universe = price_ready = no_fresh = None
+    active = 0
+    leader_symbols: list[str] = []
+    if engine is not None:
+        raw_total = int(getattr(engine.stats, "zero_fee_total_count", 0) or 0)
+        blocked_total = int(getattr(engine.stats, "zero_fee_blocked_count", 0) or 0)
+        ignored_total = int(getattr(engine.stats, "zero_fee_ignored_count", 0) or stored_ignored_count)
+        trade_universe = int(getattr(engine.stats, "zero_fee_universe_count", 0) or len(engine.zero_fee_cache) or 0)
+        w = getattr(engine.stats, "wave_state", {}) or {}
+        active = int(w.get("active") or trade_universe or 0)
+        price_ready = int(w.get("price_ready") or 0)
+        no_fresh = int(w.get("no_fresh_price") or 0)
+        leader_symbols = list(getattr(engine, "last_wave_leader_symbols", []) or [])
+    if raw_total is None or raw_total <= 0:
+        raw_total = 0
+    if blocked_total is None:
+        blocked_total = 0
+    if ignored_total is None:
+        ignored_total = stored_ignored_count
+    if trade_universe is None:
+        trade_universe = 0
+    if price_ready is None:
+        price_ready = 0
+    if no_fresh is None:
+        no_fresh = 0
+
+    scan_cap = "ALL" if int(s.get("max_zero_fee_scan_symbols") or 0) <= 0 else str(s.get("max_zero_fee_scan_symbols"))
+    ws_cap = "ALL" if int(s.get("ws_depth_max_symbols") or 0) <= 0 else str(s.get("ws_depth_max_symbols"))
+    fee_mode = "zero-fee only" if bool(s.get("only_zero_fee")) else "all active, fee-guard on entry"
+    quote = str(s.get("contract_quote_filter") or "USDT").upper()
+
+    universe_line = f"MEXC zero-fee total: {raw_total}" if raw_total else "MEXC zero-fee total: ещё нет данных"
+    leaders_line = ""
+    if str(s.get('wave_market_signal_mode') or 'all_zero_total') == 'top10_leaders':
+        leaders_line = "TOP10 leaders: " + (", ".join(leader_symbols[:10]) if leader_symbols else "будут выбраны после scan") + "\n"
     return (
-        "📈 Scanner / Symbols\n\n"
+        f"📈 Symbols / Universe {s.get('bot_version', 'v0055')}\n\n"
+        "РЕЖИМ\n"
         f"Auto-select: {'ON' if s.get('auto_select_symbols') else 'OFF'}\n"
-        f"Only zero fee: {'ON' if s.get('only_zero_fee') else 'OFF'}\n"
-        f"Manual fee fallback: {'ON' if s.get('allow_manual_fee_fallback') else 'OFF'}\n"
-        f"Scan interval: {s.get('scan_interval_sec')} sec\n"
-        f"Zero-fee universe rescan: {s.get('zero_fee_rescan_sec')} sec\n"
-        f"Zero-fee universe cap: {universe_txt} | Active price scan cap: {('ALL' if int(s.get('max_zero_fee_scan_symbols') or 0) <= 0 else s.get('max_zero_fee_scan_symbols'))}\n"
-        f"Ignored symbols: {ignored_count}\n"
-        f"Min spread: {s.get('min_spread_ticks')} ticks | Max spread: {s.get('max_spread_ticks')} ticks\n"
-        f"Min imbalance: {s.get('min_imbalance_ratio')} | Min score: {s.get('min_trade_score')}\n"
-        f"Min depth: max({s.get('min_depth_usdt')}$, position_notional × {s.get('min_depth_multiplier')})\n"
-        f"Switch threshold: +{s.get('switch_score_improvement_pct')}% | Min hold: {s.get('min_symbol_hold_sec')} sec\n\n"
-        f"Allowed symbols / whitelist:\n{allowed}\n\n"
-        "Zero-fee cache живёт только внутри запуска, ignored cache чистится при рестарте/редеплое.\n"
-        "Плохие монеты могут попасть в ignore только на текущую сессию: region restricted / unsupported / min-max margin-volume rejects.\n\n"
-        "Задать whitelist: /symbols LINK_USDT,SOL_USDT\n"
-        "Очистить whitelist и вернуть FULL AUTO: /symbols clear"
+        f"Signal: {s.get('wave_market_signal_mode', 'all_zero_total')}\n"
+        f"Fee mode: {fee_mode}\n"
+        f"Whitelist: {whitelist_txt}\n\n"
+        "UNIVERSE\n"
+        f"{universe_line}\n"
+        f"Blocked by filters: {blocked_total}\n"
+        f"Ignored this session: {ignored_total}\n"
+        f"Trade universe: {trade_universe}\n\n"
+        "СКАН\n"
+        f"Scan cap: {scan_cap} | WS cap: {ws_cap}\n"
+        f"Scanning now: {active or trade_universe} / {trade_universe}\n"
+        f"Ready prices: {price_ready}\n"
+        f"No fresh price: {no_fresh}\n"
+        f"{leaders_line}\n"
+        "ФИЛЬТРЫ\n"
+        f"Quote: {quote} only\n"
+        "Blocked: STOCK symbols\n"
+        "Fee: 0% maker/taker required\n"
+        f"Spread: {s.get('min_spread_ticks')}–{s.get('max_spread_ticks')} ticks\n"
+        f"Min depth: ${s.get('min_depth_usdt')} or position ×{s.get('min_depth_multiplier')}\n\n"
+        "ВЫБОР СДЕЛОК\n"
+        "Direction: ALL zero total или TOP10 leaders по тумблеру\n"
+        f"Pick zone: middle {int(float(s.get('wave_pick_start_pct') or 0.25) * 100)}–{int(float(s.get('wave_pick_end_pct') or 0.60) * 100)}%\n"
+        f"Basket slots: {int(s.get('wave_positions') or 5)}\n\n"
+        "КОМАНДЫ\n"
+        "/symbols LINK_USDT,SOL_USDT — whitelist\n"
+        "/symbols clear — FULL AUTO\n"
+        "/ignore clear или /clear_ignored — очистить ignored"
     )
 
 
 def symbols_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [b("Auto-select ON/OFF", "toggle:auto_select_symbols"), b("ZeroFee ON/OFF", "toggle:only_zero_fee")],
+        [b(("✅ " if STORE.load().get('wave_market_signal_mode') == 'all_zero_total' else "") + "Signal ALL", "set:wave_market_signal_mode:all_zero_total"), b(("✅ " if STORE.load().get('wave_market_signal_mode') == 'top10_leaders' else "") + "Signal TOP10", "set:wave_market_signal_mode:top10_leaders")],
         [b("Manual fallback ON/OFF", "toggle:allow_manual_fee_fallback"), b("🔍 Price Scan", "mm:scan")],
         [b("WS ON/OFF", "toggle:ws_depth_enabled"), b("MD WS", "set:market_data_mode:websocket"), b("MD REST", "set:market_data_mode:rest")],
         [b("Scan 1s", "set:scan_interval_sec:1"), b("Scan 3s", "set:scan_interval_sec:3"), b("Scan 5s", "set:scan_interval_sec:5")],
@@ -326,13 +404,56 @@ async def ensure_engine(context: ContextTypes.DEFAULT_TYPE, chat_id: int | None 
     return ENGINE
 
 
+def reset_engine_signal_state(engine: MicroMakerEngine | None) -> None:
+    """Clear market-signal hold/history after changing ALL/TOP10 mode or presets."""
+    if not engine:
+        return
+    try:
+        engine.reset_signal_state()
+    except AttributeError:
+        for attr, value in {
+            "wave_dominance_history": [],
+            "wave_signal_hold_samples": [],
+            "wave_signal_hold_last_sample_ts": 0.0,
+            "wave_signal_hold_key": None,
+            "wave_signal_hold_count": 0,
+            "wave_signal_hold_since": 0.0,
+            "wave_candidate_side": None,
+            "wave_candidate_count": 0,
+        }.items():
+            try:
+                setattr(engine, attr, value.copy() if isinstance(value, list) else value)
+            except Exception:
+                pass
+        try:
+            engine.stats.wave_state = {}
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def normalize_market_mode(raw: str) -> str | None:
+    low = str(raw or "").strip().lower()
+    if low in {"all", "all_zero", "all_zero_total", "zero", "default", "по_всем"}:
+        return "all_zero_total"
+    if low in {"top10", "top", "leaders", "leader", "top10_leaders", "топ10"}:
+        return "top10_leaders"
+    return None
+
+
+def panel_mode_for_signal_return() -> str:
+    mode = str(STORE.load().get("telegram_panel_mode") or "settings")
+    return "symbols" if mode == "symbols" else "settings"
+
+
 def panel_text(engine: MicroMakerEngine | None = None) -> str:
     e = engine or ENGINE
     if e:
         return e.quick_status_text()
     s = STORE.load()
     return (
-        f"🌊 Price Tsunami {s.get('bot_version', 'v0049')}\n"
+        f"🌊 Price Tsunami {s.get('bot_version', 'v0055')}\n"
         "State: STOPPED\n\n"
         "PRICE SCAN 10s: пока нет данных.\n"
         "LONG 0% | SHORT 0% | NEUTRAL 0%\n"
@@ -342,7 +463,7 @@ def panel_text(engine: MicroMakerEngine | None = None) -> str:
         "Normal: сейчас >=75% стороны → 5 сделок, 5x, NET +$0.05\n"
         "Tsunami: сейчас >=75% и эта же сторона выросла на +15п.п. за 60s → 5 сделок, 10x, NET +$0.10\n"
         "65/75 — итог сейчас; +15п.п. уже внутри этих процентов.\n"
-        "v0049: сигнал должен держаться 4 из 5 checks за ~10s; один шумовой провал не сбрасывает сигнал.\n\n"
+        "v0055: сигнал должен держаться 4 из 5 checks за ~10s; один шумовой провал не сбрасывает сигнал.\n\n"
         "Stop = пауза, позиции/ордера не трогает. Close All = снести всё.\n"
         "Нажми ▶️ Start Tsunami."
     )
@@ -635,8 +756,9 @@ async def preset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     apply_plus_profile()
     engine = await ensure_engine(context, chat_id)
+    reset_engine_signal_state(engine)
     engine.clear_ignored_symbols()
-    await upsert_panel(context, chat_id, "🌊 Price Tsunami v0049 применён: 10s price-scan, итоговые 65/75% + рост 15п.п., 5 LONG/SHORT, 5x/10x, REAL NET выход.\n\n" + settings_text(), settings_menu(), mode="settings")
+    await upsert_panel(context, chat_id, "🌊 Price Tsunami v0055 применён: 10s price-scan, итоговые 65/75% + рост 15п.п., 5 LONG/SHORT, 5x/10x, REAL NET выход.\n\n" + settings_text(), settings_menu(), mode="settings")
 
 
 async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -680,6 +802,9 @@ async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "hard_life": "max_position_hard_lifetime_sec",
         "switch": "switch_score_improvement_pct",
         "md": "market_data_mode",
+        "market_mode": "wave_market_signal_mode",
+        "signal_mode": "wave_market_signal_mode",
+        "signal": "wave_market_signal_mode",
         "ws": "ws_depth_enabled",
         "ws_symbols": "ws_depth_max_symbols",
         "ws_stale": "ws_book_stale_ms",
@@ -708,7 +833,13 @@ async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     raw = args[1]
     old = DEFAULTS[key]
     try:
-        if isinstance(old, bool):
+        if key == "wave_market_signal_mode":
+            normalized = normalize_market_mode(raw)
+            if not normalized:
+                await upsert_panel(context, chat_id, "❌ market mode: используй all или top10", settings_menu(), mode="settings")
+                return
+            val = normalized
+        elif isinstance(old, bool):
             val: Any = raw.lower() in {"1", "true", "yes", "on", "да", "вкл"}
         elif isinstance(old, int):
             val = int(float(raw))
@@ -717,6 +848,8 @@ async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         else:
             val = raw
         STORE.set(key, val)
+        if key == "wave_market_signal_mode":
+            reset_engine_signal_state(ENGINE)
         if key in {"scan_interval_sec", "max_zero_fee_scan_symbols", "zero_fee_rescan_sec", "zero_fee_universe_max_symbols", "min_depth_usdt", "min_depth_multiplier", "switch_score_improvement_pct", "min_imbalance_ratio", "min_trade_score", "entry_recheck_ms", "entry_recheck_required", "entry_recheck_count", "cooldown_after_loss_sec", "cooldown_after_trade_sec", "market_data_mode", "ws_depth_enabled", "ws_depth_max_symbols", "ws_book_stale_ms"}:
             await upsert_panel(context, chat_id, f"✅ {key} = {val}\n\n" + symbols_text(), symbols_menu(), mode="symbols")
         else:
@@ -730,17 +863,45 @@ async def symbols_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     chat_id = update.effective_chat.id if update.effective_chat else None
     if not chat_id:
         return
+    engine = await ensure_engine(context, chat_id)
     raw = " ".join(context.args or []).strip()
     if raw.lower() in {"clear", "auto", "all", "*"}:
         STORE.set("allowed_symbols", "")
-        await upsert_panel(context, chat_id, "✅ Whitelist очищен. Включён FULL AUTO.\n\n" + symbols_text(), symbols_menu(), mode="symbols")
+        await upsert_panel(context, chat_id, "✅ Whitelist очищен. Включён FULL AUTO.\n\n" + symbols_text(engine), symbols_menu(), mode="symbols")
         return
     syms = parse_symbols(raw)
     if not syms:
-        await upsert_panel(context, chat_id, symbols_text(), symbols_menu(), mode="symbols")
+        await upsert_panel(context, chat_id, symbols_text(engine), symbols_menu(), mode="symbols")
         return
     STORE.set("allowed_symbols", ",".join(syms))
-    await upsert_panel(context, chat_id, "✅ Whitelist updated:\n" + ", ".join(syms) + "\n\n" + symbols_text(), symbols_menu(), mode="symbols")
+    await upsert_panel(context, chat_id, "✅ Whitelist updated:\n" + ", ".join(syms) + "\n\n" + symbols_text(engine), symbols_menu(), mode="symbols")
+
+
+async def market_mode_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await safe_delete_message(context, update)
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if not chat_id:
+        return
+    engine = await ensure_engine(context, chat_id)
+    raw = " ".join(context.args or []).strip().lower()
+    normalized = normalize_market_mode(raw)
+    if normalized:
+        STORE.set("wave_market_signal_mode", normalized)
+        reset_engine_signal_state(engine)
+        if normalized == "all_zero_total":
+            msg = "✅ Market signal mode: all_zero_total — рынок считается по всему zero-fee universe."
+        else:
+            msg = "✅ Market signal mode: top10_leaders — рынок считают TOP10 ликвидных non-stable, входы из полного zero-fee universe."
+        await upsert_panel(context, chat_id, msg + "\n\n" + settings_text(), settings_menu(), mode="settings")
+        return
+    s = STORE.load()
+    await upsert_panel(
+        context, chat_id,
+        "Market signal mode: " + str(s.get("wave_market_signal_mode", "all_zero_total")) + "\n\n"
+        "Команды:\n"
+        "/market_mode all — как сейчас, рынок по всему zero-fee universe\n"
+        "/market_mode top10 — TOP10 направление: 7/10 normal, 7/10 +2 early, 8/10 tsunami; входы из полного zero-fee",
+        settings_menu(), mode="settings")
 
 
 async def ignore_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -752,9 +913,19 @@ async def ignore_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     args = [a.lower() for a in (context.args or [])]
     if args and args[0] in {"clear", "reset", "0"}:
         msg = engine.clear_ignored_symbols()
-        await upsert_panel(context, chat_id, msg + "\n\n" + symbols_text(), symbols_menu(), mode="symbols")
+        await upsert_panel(context, chat_id, msg + "\n\n" + symbols_text(engine), symbols_menu(), mode="symbols")
         return
     await upsert_panel(context, chat_id, engine.ignored_symbols_text(), symbols_menu(), mode="symbols")
+
+
+async def clear_ignored_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await safe_delete_message(context, update)
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if not chat_id:
+        return
+    engine = await ensure_engine(context, chat_id)
+    msg = engine.clear_ignored_symbols()
+    await upsert_panel(context, chat_id, msg + "\n\n" + symbols_text(engine), symbols_menu(), mode="symbols")
 
 
 async def close_all_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -896,7 +1067,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await install_command_keyboard(context, chat_id)
     s = STORE.load()
     txt = (
-        f"🆘 Price Tsunami Help — {s.get('bot_version', 'v0049')}\n\n"
+        f"🆘 Price Tsunami Help — {s.get('bot_version', 'v0055')}\n\n"
         "Логика торговли:\n"
         "1) Бот держит ALL active zero-fee *_USDT universe, без лимита 250.\n"
         "2) Каждые ~10 секунд сравнивает mid-price каждой монеты.\n"
@@ -906,8 +1077,9 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Early Wave: сейчас >=65% одной стороны и эта же сторона выросла на +15п.п. за 60s → 5 сделок, 5x, REAL NET TP +$0.05.\n"
         "Normal Wave: сейчас >=75% одной стороны → 5 сделок, 5x, REAL NET TP +$0.05.\n"
         "Tsunami: сейчас >=75% и эта же сторона выросла на +15п.п. за 60s → 5 сделок, 10x, REAL NET TP +$0.10.\n"
+        "TOP10: 7/10 = NORMAL, 7/10 + рост +2 монеты за 60с = EARLY, 8/10 = TSUNAMI. Входы всё равно из полного zero-fee universe.\n"
         "Важно: 65% и 75% — текущий итоговый процент; +15п.п. уже внутри этого значения, это не 65+15.\n"
-        "v0049 HOLD: вход только когда сигнал подтверждён 4 из 5 checks за ~10s; один шумовой провал не сбрасывает сигнал.\n\n"
+        "v0055 HOLD: вход только когда сигнал подтверждён 4 из 5 checks за ~10s; один шумовой провал не сбрасывает сигнал.\n\n"
         "Выбор монет: не самый перегретый топ, а середина 25-60% same-side candidates.\n"
         "Все сделки открываются одной стороной: либо 5 LONG, либо 5 SHORT. Если MEXC режет быстрые заявки, бот ждёт и повторяет те же слоты, затем добирает заменами.\n"
         "Закрытие: вся корзина по REAL NET equity PnL. Через 10 минут закрывает только ноль/микроплюс; минус не режет, ждёт восстановления.\n\n"
@@ -921,20 +1093,47 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await upsert_panel(context, chat_id, txt, main_menu(), mode="main")
 
 
-async def _finish_panel_task(context: ContextTypes.DEFAULT_TYPE, chat_id: int | None, engine: MicroMakerEngine, text_or_coro, reply_markup: InlineKeyboardMarkup | None = None, mode: str = "main") -> None:
-    """Execute a slow action and refresh panel afterwards. Used so button callbacks answer instantly."""
+async def _finish_panel_task(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int | None,
+    engine: MicroMakerEngine,
+    text_or_coro,
+    reply_markup: InlineKeyboardMarkup | None = None,
+    mode: str = "main",
+    append_panel: bool = True,
+    timeout_sec: float = 90.0,
+) -> None:
+    """Execute a slow action and refresh panel afterwards. Used so button callbacks answer instantly.
+
+    v0055: detail screens such as Price Scan should not append the live panel
+    underneath. Slow background actions are deduped and wrapped in a timeout so
+    repeated button taps cannot leave endless pending UI tasks.
+    """
     if not chat_id:
         return
     try:
         if asyncio.iscoroutine(text_or_coro):
-            msg = await text_or_coro
+            msg = await asyncio.wait_for(text_or_coro, timeout=max(1.0, float(timeout_sec or 90.0)))
         else:
             msg = str(text_or_coro)
-        await upsert_panel(context, chat_id, (msg + "\n\n" + panel_text(engine))[:3900], reply_markup or main_menu(), mode=mode)
+        final_text = msg if not append_panel else (msg + "\n\n" + panel_text(engine))
+        await upsert_panel(context, chat_id, final_text[:3900], reply_markup or main_menu(), mode=mode)
+    except asyncio.TimeoutError as e:
+        log_error("telegram_background_panel_task_timeout", e, mode=mode, timeout_sec=timeout_sec)
+        try:
+            fallback = f"⏱ Команда не завершилась за {timeout_sec:.0f}с. Проверь статус/лог; повторный тап не запускает дубль в фоне."
+            if append_panel:
+                fallback += "\n\n" + panel_text(engine)
+            await upsert_panel(context, chat_id, fallback[:3900], reply_markup or main_menu(), mode=mode)
+        except Exception:
+            pass
     except Exception as e:
         log_error("telegram_background_panel_task_error", e, mode=mode)
         try:
-            await upsert_panel(context, chat_id, f"❌ Ошибка фоновой команды: {str(e)[:500]}\n\n" + panel_text(engine), reply_markup or main_menu(), mode=mode)
+            fallback = f"❌ Ошибка фоновой команды: {str(e)[:500]}"
+            if append_panel:
+                fallback += "\n\n" + panel_text(engine)
+            await upsert_panel(context, chat_id, fallback[:3900], reply_markup or main_menu(), mode=mode)
         except Exception:
             pass
 
@@ -964,14 +1163,14 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await edit_query_as_panel(q, settings_text(), settings_menu(), mode="settings")
         return
     if data == "menu:symbols":
-        await edit_query_as_panel(q, symbols_text(), symbols_menu(), mode="symbols")
+        await edit_query_as_panel(q, symbols_text(engine), symbols_menu(), mode="symbols")
         return
     if data == "menu:api":
         await edit_query_as_panel(q, api_text(), main_menu(), mode="api")
         return
     if data == "mm:start":
         await edit_query_as_panel(q, "▶️ Start принят, запускаю цикл...\n\n" + panel_text(engine), main_menu(), mode="main")
-        spawn_ui_task(_finish_panel_task(context, chat_id, engine, engine.start(), main_menu(), mode="main"), name="ui_start_live")
+        spawn_ui_task(_finish_panel_task(context, chat_id, engine, engine.start(), main_menu(), mode="main", timeout_sec=90.0), name="ui_start_live")
         return
     if data == "mm:stop":
         # Stop is a hard pause only: no order/position cleanup here.
@@ -984,20 +1183,20 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 t.cancel()
         engine.active_tasks.clear()
         await edit_query_as_panel(q, "⏸ Stop принят мгновенно. Скан/новые сделки остановлены. Ордера и позиции НЕ трогаю.\n\n" + panel_text(engine), main_menu(), mode="main")
-        spawn_ui_task(_finish_panel_task(context, chat_id, engine, engine.stop(close_positions=False), main_menu(), mode="main"), name="ui_stop_live")
+        spawn_ui_task(_finish_panel_task(context, chat_id, engine, engine.stop(close_positions=False), main_menu(), mode="main", timeout_sec=60.0), name="ui_stop_live")
         return
     if data == "mm:close_all":
         engine.running = False
         STORE.set("live_enabled", False)
         await edit_query_as_panel(q, "❌ Close All принят. Закрытие/отмена запущены в фоне...\n\n" + panel_text(engine), main_menu(), mode="main")
-        spawn_ui_task(_finish_panel_task(context, chat_id, engine, engine.close_all(), main_menu(), mode="main"), name="ui_close_all")
+        spawn_ui_task(_finish_panel_task(context, chat_id, engine, engine.close_all(), main_menu(), mode="main", timeout_sec=180.0), name="ui_close_all")
         return
     if data == "mm:status":
         await edit_query_as_panel(q, panel_text(engine), main_menu(), mode="main")
         return
     if data == "mm:scan":
-        await edit_query_as_panel(q, "🔍 Scan Now принят, сканирую в фоне...", symbols_menu(), mode="symbols")
-        spawn_ui_task(_finish_panel_task(context, chat_id, engine, engine.scan_now_text(), symbols_menu(), mode="symbols"), name="ui_scan_now")
+        await edit_query_as_panel(q, "🔍 Price Scan: обновляю данные...", main_menu(), mode="scan")
+        spawn_ui_task(_finish_panel_task(context, chat_id, engine, engine.scan_now_text(), main_menu(), mode="scan", append_panel=False, timeout_sec=60.0), name="ui_scan_now")
         return
     if data == "mm:balance":
         if chat_id:
@@ -1010,24 +1209,40 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         async def fee_task():
             s = STORE.load()
             client = MexcFuturesClient(s.get("mexc_api_key"), s.get("mexc_api_secret"), settings=s)
-            await client.sync_time()
-            zeros = await client.verified_zero_fee_symbols(int(s.get("zero_fee_universe_max_symbols") or 0))
-            return "🧾 API zero-fee symbols:\n" + (", ".join(zeros) if zeros else "Не нашёл API-подтверждённые zero-fee пары.")
+            await asyncio.wait_for(client.sync_time(), timeout=12.0)
+            zeros = await asyncio.wait_for(client.verified_zero_fee_symbols(int(s.get("zero_fee_universe_max_symbols") or 0)), timeout=30.0)
+            raw_total = len(zeros)
+            blocked = [x for x in zeros if engine._blocked_symbol(x)]
+            ignored = engine._ignored_symbols(s)
+            trade = [x for x in zeros if x and x not in ignored and not engine._blocked_symbol(x)]
+            first = ", ".join(trade[:40]) if trade else "-"
+            more = f"\n...ещё {max(0, len(trade) - 40)}" if len(trade) > 40 else ""
+            return (
+                f"🧾 Fees / Zero-fee {s.get('bot_version', 'v0055')}\n\n"
+                f"API-confirmed zero-fee total: {raw_total}\n"
+                f"Blocked by filters: {len(blocked)}\n"
+                f"Ignored this session: {len(ignored)}\n"
+                f"Trade universe zero-fee *_USDT: {len(trade)}\n\n"
+                f"Fee guard: {'ON' if s.get('require_contract_zero_fee_on_entry') else 'OFF'}\n"
+                f"Only zero-fee: {'ON' if s.get('only_zero_fee') else 'OFF'}\n\n"
+                f"Первые zero-fee торговые пары:\n{first}{more}"
+            )
         await edit_query_as_panel(q, "🧾 Fees принят, проверяю API в фоне...", main_menu(), mode="api")
-        spawn_ui_task(_finish_panel_task(context, chat_id, engine, fee_task(), main_menu(), mode="api"), name="ui_fees")
+        spawn_ui_task(_finish_panel_task(context, chat_id, engine, fee_task(), main_menu(), mode="api", append_panel=False, timeout_sec=60.0), name="ui_fees")
         return
     if data == "symbols:clear":
         STORE.set("allowed_symbols", "")
-        await edit_query_as_panel(q, symbols_text(), symbols_menu(), mode="symbols")
+        await edit_query_as_panel(q, symbols_text(engine), symbols_menu(), mode="symbols")
         return
     if data == "ignore:clear":
         msg = engine.clear_ignored_symbols()
-        await edit_query_as_panel(q, msg + "\n\n" + symbols_text(), symbols_menu(), mode="symbols")
+        await edit_query_as_panel(q, msg + "\n\n" + symbols_text(engine), symbols_menu(), mode="symbols")
         return
     if data == "preset:plus":
         apply_plus_profile()
+        reset_engine_signal_state(engine)
         engine.clear_ignored_symbols()
-        await edit_query_as_panel(q, "🧺 Price Tsunami v0049 применён.\n\n" + settings_text(), settings_menu(), mode="settings")
+        await edit_query_as_panel(q, "🧺 Price Tsunami v0055 применён.\n\n" + settings_text(), settings_menu(), mode="settings")
         return
     if data == "preset:custom":
         STORE.set("trade_profile", "custom")
@@ -1036,14 +1251,28 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if data.startswith("preset:spread:"):
         _, _, mn, mx = data.split(":", 3)
         STORE.update({"min_spread_ticks": int(float(mn)), "max_spread_ticks": int(float(mx))})
-        await edit_query_as_panel(q, symbols_text(), symbols_menu(), mode="symbols")
+        await edit_query_as_panel(q, symbols_text(engine), symbols_menu(), mode="symbols")
         return
     if data.startswith("toggle:"):
         key = data.split(":", 1)[1]
         s = STORE.load()
         STORE.set(key, not bool(s.get(key)))
         if key in {"auto_select_symbols", "allow_manual_fee_fallback", "only_zero_fee", "ws_depth_enabled"}:
-            await edit_query_as_panel(q, symbols_text(), symbols_menu(), mode="symbols")
+            await edit_query_as_panel(q, symbols_text(engine), symbols_menu(), mode="symbols")
+        else:
+            await edit_query_as_panel(q, settings_text(), settings_menu(), mode="settings")
+        return
+    if data.startswith("set:wave_market_signal_mode:"):
+        _, key, raw = data.split(":", 2)
+        value = normalize_market_mode(raw) or raw
+        if value not in {"all_zero_total", "top10_leaders"}:
+            await edit_query_as_panel(q, "❌ market mode: используй all или top10", settings_menu(), mode="settings")
+            return
+        STORE.set(key, value)
+        reset_engine_signal_state(engine)
+        return_mode = panel_mode_for_signal_return()
+        if return_mode == "symbols":
+            await edit_query_as_panel(q, symbols_text(engine), symbols_menu(), mode="symbols")
         else:
             await edit_query_as_panel(q, settings_text(), settings_menu(), mode="settings")
         return
@@ -1061,7 +1290,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 value = raw
             STORE.set(key, value)
             if key in {"scan_interval_sec", "max_zero_fee_scan_symbols", "zero_fee_rescan_sec", "zero_fee_universe_max_symbols", "min_depth_usdt", "min_depth_multiplier", "switch_score_improvement_pct", "min_spread_ticks", "max_spread_ticks", "min_imbalance_ratio", "min_trade_score", "entry_recheck_ms", "entry_recheck_required", "entry_recheck_count", "cooldown_after_loss_sec", "cooldown_after_trade_sec", "market_data_mode", "ws_depth_enabled", "ws_depth_max_symbols", "ws_book_stale_ms"}:
-                await edit_query_as_panel(q, symbols_text(), symbols_menu(), mode="symbols")
+                await edit_query_as_panel(q, symbols_text(engine), symbols_menu(), mode="symbols")
             else:
                 await edit_query_as_panel(q, settings_text(), settings_menu(), mode="settings")
         except Exception as e:
@@ -1083,6 +1312,8 @@ async def post_init(app: Application) -> None:
             BotCommand("log_full", "Полный .txt лог для диагностики"),
             BotCommand("help", "Справка"),
             BotCommand("preset", "Plus/custom профиль"),
+            BotCommand("market_mode", "all или top10 режим сигнала рынка"),
+            BotCommand("clear_ignored", "Очистить ignored-лист"),
         ])
     except TelegramError:
         pass
@@ -1117,7 +1348,9 @@ def main() -> None:
     app.add_handler(CommandHandler("preset", admin_guard(preset_cmd)))
     app.add_handler(CommandHandler("set", admin_guard(set_cmd)))
     app.add_handler(CommandHandler("symbols", admin_guard(symbols_cmd)))
+    app.add_handler(CommandHandler("market_mode", admin_guard(market_mode_cmd)))
     app.add_handler(CommandHandler("ignore", admin_guard(ignore_cmd)))
+    app.add_handler(CommandHandler("clear_ignored", admin_guard(clear_ignored_cmd)))
     app.add_handler(CommandHandler("close_all", admin_guard(close_all_cmd)))
     app.add_handler(CommandHandler("closeall", admin_guard(close_all_cmd)))
     app.add_handler(CallbackQueryHandler(admin_guard(callback)))

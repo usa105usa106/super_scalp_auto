@@ -1,68 +1,35 @@
-# MEXC Micro Maker LIVE v0049
+# MEXC Micro Maker Bot — v0055 Button Audit Fix
 
-## v0049 Price Tsunami — clean universe diagnostics
+v0055 is a code/button audit build over v0054.
 
-Главное изменение v0049: Telegram-панель больше не пишет мутное `UNIVERSE = 144`, будто это весь zero-fee список. Теперь она честно показывает весь путь:
+## What was checked/fixed
 
-```text
-MEXC zero-fee total: 377 | blocked 233 | ignored 0 | trade universe zero-fee *_USDT: 144 | scan cap ALL
-PRICE SCAN 10s: counted 144 / scan universe 144
-```
+- Python syntax: `python -m py_compile *.py` OK.
+- Telegram callback map checked: all buttons point to existing settings/actions.
+- Slow buttons now answer immediately and run in deduped background tasks.
+- Repeated taps on Start / Stop / Close All / Price Scan / Fees do not spawn duplicate background jobs.
+- Background UI tasks have timeouts, so a stuck API call does not leave an endless panel update task.
+- Price Scan is read-only for signal/hold state: pressing it cannot help trigger HOLD or mutate live trading state.
+- Signal ALL / Signal TOP10 buttons reset old HOLD/history state and refresh the correct screen.
+- `/market_mode all|top10` and `/set signal all|top10` normalize aliases correctly.
+- `/clear_ignored` command added as a direct alias for `/ignore clear`.
+- Fees screen cleaned and truncated; it shows counts and first pairs instead of an unreadable wall.
 
-Что означают цифры:
+## Signal modes
 
-- `MEXC zero-fee total` — сырой список 0% fee contracts от MEXC до фильтров.
-- `blocked` — пары, которые бот не должен торговать по текущим правилам: не `*_USDT`, `STOCK`, неподходящий quote/collateral.
-- `ignored` — монеты, которые бот сам/пользователь отправил в ignore.
-- `trade universe zero-fee *_USDT` — реальные разрешённые монеты для скана и торговли.
-- `PRICE SCAN counted` — сколько монет реально входит в голосование LONG/SHORT/NEUTRAL.
+Default:
+- `all_zero_total`: market direction is decided by the full zero-fee trade universe.
 
-Universe:
+Toggle:
+- `/market_mode top10`: market direction is decided by TOP10 liquid non-stable zero-fee leaders.
+- Entries are still picked from the full zero-fee universe.
 
-- `only_zero_fee = true` -> брать API-confirmed 0% fee contracts, потом оставить разрешённые `*_USDT`.
-- `only_zero_fee = false` -> брать active public `*_USDT`, но pre-trade fee guard всё равно проверяет комиссии перед входом.
-- `zero_fee_universe_max_symbols = 0` -> не резать сырой zero-fee universe.
-- `max_zero_fee_scan_symbols = 0` -> не резать scan universe.
-- `ws_depth_max_symbols = 0` -> WS подписка на весь scan universe.
+TOP10 rules:
+- 7/10 leaders in one direction = NORMAL, 5x, REAL NET +0.05.
+- 7/10 leaders plus +2 leaders growth over 60s = EARLY, 5x, REAL NET +0.05.
+- 8/10 leaders in one direction = TSUNAMI, 10x, REAL NET +0.10.
+- Signal still needs HOLD 4/5 checks over about 10 seconds.
 
-Price Tsunami logic:
-
-- каждые ~10 секунд сравнивается цена каждой монеты из trade universe;
-- price up -> LONG vote;
-- price down -> SHORT vote;
-- flat/no history/no fresh price -> NEUTRAL vote;
-- проценты LONG/SHORT/NEUTRAL считаются от всего scan universe, а не только от price-ready монет.
-
-Risk modes:
-
-- Early Wave: dominance сейчас >= 65% и эта же сторона выросла на +15п.п. за ~60s -> 5x, basket REAL NET TP +0.05 USDT.
-- Normal Wave: dominance сейчас >= 75% -> 5x, basket REAL NET TP +0.05 USDT.
-- Tsunami: dominance сейчас >= 75% и эта же сторона выросла на +15п.п. за ~60s -> 10x, basket REAL NET TP +0.10 USDT.
-
-Signal hold v0049:
-
-- сигнал должен подтвердиться 4 из 5 checks;
-- окно удержания около 10 секунд;
-- один шумовой провал не сбрасывает сигнал полностью.
-
-Entry behavior:
-
-- LONG: aggressive LIMIT по уже существующей ask-side ликвидности;
-- SHORT: aggressive LIMIT по уже существующей bid-side ликвидности;
-- `wave_entry_post_only = false`, поэтому это не maker-очередь;
-- TTL около 450 ms, потом cancel остатка;
-- если MEXC режет запросы/rate-limit — пауза и retry;
-- если нет fill/flip/spread/liquidity — top-up scan и замена слота.
-
-Basket behavior:
-
-- открывается 5 монет одной стороной: либо 5 LONG, либо 5 SHORT;
-- выбор из middle 25-60% same-side candidates, не из перегретого топа;
-- закрытие всей корзины по REAL NET equity PnL;
-- close mode по умолчанию MARKET, чтобы быстро забрать общий плюс;
-- после 10 минут: если ноль/микроплюс — закрыть, если минус — ждать восстановления.
-
-Control:
-
-- Stop/Pause = пауза, не закрывает позиции и не отменяет ордера;
-- Close All = отменяет ордера и закрывает все позиции market.
+Version/profile:
+- `bot_version = v0055`
+- `trade_profile = wave_price_tsunami_v0055`
