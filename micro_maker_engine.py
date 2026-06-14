@@ -41,7 +41,14 @@ class EngineStats:
     market_data_source: str = "REST"
     ws_books: int = 0
     ws_fresh_books: int = 0
+    # Universe diagnostics shown in Telegram.
+    # total_count is the raw list before strategy filters; universe_count is the
+    # usable/tradeable scan pool after quote/STOCK/ignore filters.
+    zero_fee_total_count: int = 0
+    zero_fee_blocked_count: int = 0
+    zero_fee_ignored_count: int = 0
     zero_fee_universe_count: int = 0
+    zero_fee_scan_count: int = 0
     ignored_symbols_count: int = 0
     wave_state: dict[str, Any] = field(default_factory=dict)
 
@@ -66,6 +73,14 @@ class MicroMakerEngine:
         self.mid_history: dict[str, list[tuple[float, float, float]]] = {}
         self.wave_candidate_side: str | None = None
         self.wave_candidate_count: int = 0
+        # v0049: market signal hold/stability guard. A one-tick acceleration spike
+        # must not fire a basket. The signal is sampled over a time window,
+        # so one noisy failed check does not fully reset a valid wave.
+        self.wave_signal_hold_key: str | None = None
+        self.wave_signal_hold_count: int = 0
+        self.wave_signal_hold_since: float = 0.0
+        self.wave_signal_hold_samples: list[tuple[float, str]] = []
+        self.wave_signal_hold_last_sample_ts: float = 0.0
         self.wave_cooldown_until_ts: float = 0.0
         self.wave_dominance_history: list[tuple[float, float, float]] = []  # ts, long_dom, short_dom
         self.last_wave_vote_rows: list[dict[str, Any]] = []
@@ -180,7 +195,7 @@ class MicroMakerEngine:
         # indexes and tokenized tickers without this substring remain allowed.
         if "STOCK" in sym:
             return True
-        # v0046: the account balance/margin shown by MEXC is USDT. Contracts like
+        # v0049: the account balance/margin shown by MEXC is USDT. Contracts like
         # SOL_USDC/BTC_USDC require USDC collateral, so MEXC returns
         # "Balance insufficient" with available=0 even when USDT is free.
         # Basket mode must therefore trade only *_USDT contracts by default.
@@ -543,7 +558,7 @@ class MicroMakerEngine:
     async def _ensure_market_ws(self, symbols: list[str], s: dict[str, Any]) -> None:
         """Start/refresh WS subscriptions for fast depth scanning.
 
-        v0046 rule: 0 means ALL. The price vote must be based on the real
+        v0049 rule: 0 means ALL. The price vote must be based on the real
         active zero-fee universe count, not on an arbitrary 250-symbol cap.
         """
         if str(s.get("market_data_mode") or "websocket").lower() != "websocket" or not bool(s.get("ws_depth_enabled")):
@@ -669,7 +684,7 @@ class MicroMakerEngine:
             self._log_error("start_balance_error", e)
         self.task = asyncio.create_task(self._run_loop(), name="micro_maker_loop")
         self._log_event("start_success", start_equity=self.stats.start_equity)
-        return "▶️ Price Tsunami v0046 запущен. Схема: price-scan 10s по активным zero-fee монетам → LONG/SHORT/NEUTRAL проценты → 5 сделок одной стороной → закрытие всей корзины по REAL NET PnL."
+        return "▶️ Price Tsunami v0049 запущен. Схема: price-scan 10s по активным zero-fee монетам → LONG/SHORT/NEUTRAL проценты → 5 сделок одной стороной → закрытие всей корзины по REAL NET PnL."
 
     async def stop(self, close_positions: bool = False) -> str:
         self._log_event("stop_requested", close_positions=close_positions, active_tasks=list(self.active_tasks.keys()))
@@ -844,6 +859,14 @@ class MicroMakerEngine:
             "net": float(w.get("net") or self.stats.net_equity_pnl or 0.0),
             "peak": float(w.get("peak") or 0.0),
             "slots": list(w.get("slots") or []),
+            "pending_mode": str(w.get("pending_mode") or w.get("detected_mode") or "").lower(),
+            "pending_side": str(w.get("pending_side") or w.get("side") or "-").upper(),
+            "hold_count": int(w.get("signal_hold_count") or 0),
+            "hold_need": int(w.get("signal_hold_need") or 0),
+            "hold_checks": int(w.get("signal_hold_checks") or w.get("signal_hold_need") or 0),
+            "hold_for": float(w.get("signal_hold_for") or 0.0),
+            "hold_sec": float(w.get("signal_hold_sec") or 0.0),
+            "hold_reason": str(w.get("reason") or ""),
         }
 
     def _format_wave_status(self, s: dict[str, Any]) -> str:
@@ -897,6 +920,13 @@ class MicroMakerEngine:
         total_losses = int(s.get("total_losses_count") or 0)
         total_pnl = float(s.get("total_estimated_pnl_usdt") or 0.0)
         display_side = "-" if v["mode"] == "wait" else v["side"]
+        hold_line = ""
+        if v.get("pending_mode") and v.get("pending_mode") != "wait" and v.get("hold_need", 0) > 1:
+            hold_line = (
+                f"SIGNAL HOLD: {self._mode_title(v['pending_mode'])} {v['pending_side']} "
+                f"{v['hold_count']}/{v['hold_checks']} checks, нужно {v['hold_need']}/{v['hold_checks']}; "
+                f"окно {v['hold_for']:.1f}/{v['hold_sec']:.1f}s\n"
+            )
         if v["mode"] == "wait":
             mode_line = "Вывод: рынка нет — сидим в засаде, сделки не открываем."
         elif v["mode"] == "early":
@@ -905,18 +935,39 @@ class MicroMakerEngine:
             mode_line = f"Вывод: рынок {v['side']} — открыть {v['target_slots']} {v['side']}, 5x, TP +$0.05."
         else:
             mode_line = f"Вывод: TSUNAMI {v['side']} — открыть {v['target_slots']} {v['side']}, 10x, TP +$0.10."
+
+        raw_total = int(getattr(self.stats, "zero_fee_total_count", 0) or 0)
+        blocked_total = int(getattr(self.stats, "zero_fee_blocked_count", 0) or 0)
+        ignored_total = int(getattr(self.stats, "zero_fee_ignored_count", 0) or 0)
+        usable_total = int(getattr(self.stats, "zero_fee_universe_count", 0) or len(self.zero_fee_cache) or v['active'])
+        scan_total = int(getattr(self.stats, "zero_fee_scan_count", 0) or usable_total)
+        if raw_total <= 0:
+            raw_total = usable_total
+        scan_cap_txt = "ALL" if int(s.get('max_zero_fee_scan_symbols') or 0) <= 0 else str(s.get('max_zero_fee_scan_symbols'))
+        if s.get('only_zero_fee'):
+            universe_line = (
+                f"MEXC zero-fee total: {raw_total} | blocked {blocked_total} | "
+                f"ignored {ignored_total} | trade universe zero-fee *_USDT: {usable_total}"
+            )
+        else:
+            universe_line = (
+                f"MEXC active *_USDT total: {raw_total} | blocked {blocked_total} | "
+                f"ignored {ignored_total} | trade universe: {usable_total}"
+            )
+
         return (
-            f"🌊 Price Tsunami {s.get('bot_version', 'v0046')}\n"
+            f"🌊 Price Tsunami {s.get('bot_version', 'v0049')}\n"
             f"State: {state} | {last_update} | uptime {h:02d}:{m:02d}:{sec:02d}{cooldown_txt}\n\n"
-            f"UNIVERSE: {('ALL zero-fee *_USDT' if s.get('only_zero_fee') else 'ALL active *_USDT')} = {self.stats.zero_fee_universe_count or len(self.zero_fee_cache) or v['active']} | scan cap {('ALL' if int(s.get('max_zero_fee_scan_symbols') or 0) <= 0 else s.get('max_zero_fee_scan_symbols'))}\n"
-            f"PRICE SCAN 10s: counted {v['active']} / universe {self.stats.zero_fee_universe_count or len(self.zero_fee_cache) or v['active']}\n"
+            f"{universe_line} | scan cap {scan_cap_txt}\n"
+            f"PRICE SCAN 10s: counted {v['active']} / scan universe {scan_total}\n"
             f"DATA: price-ready {v['price_ready']} | no fresh price → NEUTRAL {v['no_fresh_price']}\n"
             f"LONG {self._fmt_pct(v['long_pct'])} ({v['long']}) | "
             f"SHORT {self._fmt_pct(v['short_pct'])} ({v['short']}) | "
             f"NEUTRAL {self._fmt_pct(v['neutral_pct'])} ({v['neutral']})\n"
             f"За 60с {self._wave_accel_lines({'old_long_pct': v['old_long_pct'], 'old_short_pct': v['old_short_pct'], 'long_pct': v['long_pct'], 'short_pct': v['short_pct'], 'long_acceleration': v['long_acc'], 'short_acceleration': v['short_acc']})[0]}\n"
             f"За 60с {self._wave_accel_lines({'old_long_pct': v['old_long_pct'], 'old_short_pct': v['old_short_pct'], 'long_pct': v['long_pct'], 'short_pct': v['short_pct'], 'long_acceleration': v['long_acc'], 'short_acceleration': v['short_acc']})[1]}\n"
-            f"Mode: {v['title']} | {mode_line}\n\n"
+            f"Mode: {v['title']} | {mode_line}\n"
+            f"{hold_line}\n"
             f"ENTRY: aggressive LIMIT to existing book liquidity, TTL cancel/retry | close = MARKET\n"
             f"BASKET: {v['opened']}/{v['target_slots']} открыто | direction {display_side} | leverage {v['leverage']}x\n"
             f"{slots_txt}\n"
@@ -967,7 +1018,13 @@ class MicroMakerEngine:
             # Build the same decision text the live loop uses, but do not open trades here.
             _side, picks, details = self._detect_wave_signal(rows, s)
             v = self._wave_view(s)
-            universe = self.stats.zero_fee_universe_count or len(self.zero_fee_cache)
+            raw_total = int(getattr(self.stats, "zero_fee_total_count", 0) or 0)
+            blocked_total = int(getattr(self.stats, "zero_fee_blocked_count", 0) or 0)
+            ignored_detail = int(getattr(self.stats, "zero_fee_ignored_count", 0) or 0)
+            universe = int(self.stats.zero_fee_universe_count or len(self.zero_fee_cache) or v["active"])
+            scan_total = int(getattr(self.stats, "zero_fee_scan_count", 0) or universe)
+            if raw_total <= 0:
+                raw_total = universe
             ignored = self.stats.ignored_symbols_count or len(self._ignored_symbols(s))
             candidates = int(details.get("trade_candidates") or 0) if isinstance(details, dict) else 0
             selected = ", ".join([str(r.get("symbol")) for r in picks[: int(s.get("wave_positions") or 5)]]) or "-"
@@ -981,8 +1038,8 @@ class MicroMakerEngine:
                 decision = f"TSUNAMI {v['side']}: 5 {v['side']}, 10x, REAL NET TP +$0.10"
             return (
                 "🔍 PRICE SCAN NOW\n\n"
-                f"Universe: {('ALL zero-fee *_USDT' if s.get('only_zero_fee') else 'ALL active *_USDT')} = {universe} | scan cap {('ALL' if int(s.get('max_zero_fee_scan_symbols') or 0) <= 0 else s.get('max_zero_fee_scan_symbols'))} | ignored {ignored}\n"
-                f"Price scan counted: {v['active']} / universe {universe}\n"
+                f"MEXC {'zero-fee total' if s.get('only_zero_fee') else 'active total'}: {raw_total} | blocked {blocked_total} | ignored from raw {ignored_detail} | trade universe: {universe} | scan cap {('ALL' if int(s.get('max_zero_fee_scan_symbols') or 0) <= 0 else s.get('max_zero_fee_scan_symbols'))} | ignored total {ignored}\n"
+                f"Price scan counted: {v['active']} / scan universe {scan_total}\n"
                 f"Price-ready: {v['price_ready']} | no fresh price → NEUTRAL: {v['no_fresh_price']}\n"
                 f"LONG {self._fmt_pct(v['long_pct'])} ({v['long']}) | "
                 f"SHORT {self._fmt_pct(v['short_pct'])} ({v['short']}) | "
@@ -993,6 +1050,7 @@ class MicroMakerEngine:
                 f"Trade candidates after depth/spread/fee filters: {candidates}\n"
                 f"Middle 25-60% picks: {selected}\n\n"
                 f"Rules: normal = сейчас >=75%; early = сейчас >=65% и рост +15п.п.; tsunami = сейчас >=75% и рост +15п.п.\n"
+                f"Hold: нужно {int(s.get('wave_signal_hold_required') or 4)} из {int(s.get('wave_signal_hold_checks') or 5)} checks за ~{float(s.get('wave_signal_hold_sec') or 10.0):.0f}s, не один тик.\n"
                 f"Важно: 65/75 — текущий итог, +15п.п. уже внутри него.\n"
                 f"Market data: {self._market_data_status()}"
             )
@@ -1022,7 +1080,7 @@ class MicroMakerEngine:
 
     async def _run_loop(self) -> None:
         self._log_event("run_loop_started")
-        await self._notify("✅ Price Tsunami v0046 started: 10s price scan, current 65/75% + 15п.п. growth rules, 5 one-side basket, REAL NET TP +$0.05 / tsunami +$0.10.")
+        await self._notify("✅ Price Tsunami v0049 started: 10s price scan, 65/75% + 15п.п.; HOLD 4/5 checks за ~10s; 5 one-side basket, REAL NET TP +$0.05 / tsunami +$0.10.")
         while self.running:
             try:
                 s = self._settings()
@@ -1107,17 +1165,23 @@ class MicroMakerEngine:
         ignored = self._ignored_symbols(s)
 
         def apply_scan_cap(pool: list[str]) -> list[str]:
-            # v0046: max_zero_fee_scan_symbols <= 0 means ALL symbols, no 250 cap.
+            # v0049: max_zero_fee_scan_symbols <= 0 means ALL symbols, no 250 cap.
             limit = int(s.get("max_zero_fee_scan_symbols") or 0)
             return pool[:limit] if limit > 0 else pool
 
         # Manual whitelist: trade exactly the user's symbols, not a hidden 250 window.
         if allowed_set and not (s.get("auto_select_symbols") and s.get("only_zero_fee")):
+            blocked = [x for x in allowed if self._blocked_symbol(x)]
+            ignored_list = [x for x in allowed if self._is_ignored_symbol(x, s)]
             pool = [x for x in allowed if not self._is_ignored_symbol(x, s) and not self._blocked_symbol(x)]
             out = apply_scan_cap(pool)
+            self.stats.zero_fee_total_count = len(allowed)
+            self.stats.zero_fee_blocked_count = len(blocked)
+            self.stats.zero_fee_ignored_count = len(ignored_list)
             self.stats.zero_fee_universe_count = len(pool)
+            self.stats.zero_fee_scan_count = len(out)
             self.stats.ignored_symbols_count = len(ignored)
-            self._log_event("symbol_pool_manual", allowed=len(allowed), out_count=len(out), scan_cap=(int(s.get("max_zero_fee_scan_symbols") or 0) or "ALL"), symbols=out[:30])
+            self._log_event("symbol_pool_manual", allowed=len(allowed), blocked=len(blocked), ignored=len(ignored_list), usable=len(pool), out_count=len(out), scan_cap=(int(s.get("max_zero_fee_scan_symbols") or 0) or "ALL"), symbols=out[:30])
             return out
 
         # If zero-fee filter is OFF, scan all active public *_USDT contracts.
@@ -1125,12 +1189,18 @@ class MicroMakerEngine:
         if s.get("auto_select_symbols") and not s.get("only_zero_fee"):
             active_limit = int(s.get("zero_fee_universe_max_symbols") or 0)
             fresh = await client.active_usdt_symbols(active_limit)
+            blocked = [x for x in fresh if self._blocked_symbol(x)]
+            ignored_list = [x for x in fresh if x in ignored]
             pool = [x for x in fresh if x and x not in ignored and not self._blocked_symbol(x) and (not allowed_set or x in allowed_set)]
-            self.stats.zero_fee_universe_count = len(pool)
-            self.stats.ignored_symbols_count = len(ignored)
             out = apply_scan_cap(pool)
-            self.stats.last_action = f"active universe rebuilt: all={len(fresh)}, ignored={len(ignored)}, usable={len(pool)}, scan={len(out)}"
-            self._log_event("active_symbol_pool", all_count=len(fresh), ignored=len(ignored), usable=len(pool), returned=len(out), scan_cap=(int(s.get("max_zero_fee_scan_symbols") or 0) or "ALL"), first_symbols=out[:30])
+            self.stats.zero_fee_total_count = len(fresh)
+            self.stats.zero_fee_blocked_count = len(blocked)
+            self.stats.zero_fee_ignored_count = len(ignored_list)
+            self.stats.zero_fee_universe_count = len(pool)
+            self.stats.zero_fee_scan_count = len(out)
+            self.stats.ignored_symbols_count = len(ignored)
+            self.stats.last_action = f"active universe rebuilt: total={len(fresh)}, blocked={len(blocked)}, ignored={len(ignored_list)}, usable={len(pool)}, scan={len(out)}"
+            self._log_event("active_symbol_pool", total_count=len(fresh), blocked=len(blocked), ignored=len(ignored_list), usable=len(pool), returned=len(out), scan_cap=(int(s.get("max_zero_fee_scan_symbols") or 0) or "ALL"), first_symbols=out[:30])
             return out
 
         # Normal Price Tsunami mode: API-confirmed zero-fee universe, no fixed 250 cap.
@@ -1146,15 +1216,20 @@ class MicroMakerEngine:
                 # pre-sorts by 24h volume when public ticker data is available.
                 fresh = await client.verified_zero_fee_symbols(universe_limit)
                 blocked = [x for x in fresh if self._blocked_symbol(x)]
+                ignored_list = [x for x in fresh if x in ignored]
                 self.zero_fee_cache = [x for x in fresh if x and x not in ignored and not self._blocked_symbol(x)]
                 self.zero_fee_ts = now
+                self.stats.zero_fee_total_count = len(fresh)
+                self.stats.zero_fee_blocked_count = len(blocked)
+                self.stats.zero_fee_ignored_count = len(ignored_list)
                 self.stats.zero_fee_universe_count = len(self.zero_fee_cache)
+                self.stats.zero_fee_scan_count = len(self.zero_fee_cache)
                 self.stats.ignored_symbols_count = len(ignored)
                 self.stats.last_action = (
-                    f"zero-fee universe rebuilt: all={len(fresh)}, "
-                    f"ignored={len(ignored)}, blocked={len(blocked)}, usable={len(self.zero_fee_cache)}"
+                    f"zero-fee universe rebuilt: total={len(fresh)}, "
+                    f"blocked={len(blocked)}, ignored={len(ignored_list)}, usable={len(self.zero_fee_cache)}"
                 )
-                self._log_event("zero_fee_rescan_done", all_count=len(fresh), ignored=len(ignored), blocked=len(blocked), usable=len(self.zero_fee_cache), universe_cap=(universe_limit or "ALL"), first_symbols=self.zero_fee_cache[:30])
+                self._log_event("zero_fee_rescan_done", total_count=len(fresh), blocked=len(blocked), ignored=len(ignored_list), usable=len(self.zero_fee_cache), universe_cap=(universe_limit or "ALL"), first_symbols=self.zero_fee_cache[:30])
             except Exception as e:
                 # Good cache behavior: never destroy a working universe just because
                 # one rescan failed. Keep the previous cache and wait until the next
@@ -1172,10 +1247,15 @@ class MicroMakerEngine:
             return []
 
         pool = [x for x in self.zero_fee_cache if x not in ignored and not self._blocked_symbol(x) and (not allowed_set or x in allowed_set)]
-        self.stats.zero_fee_universe_count = len(pool)
-        self.stats.ignored_symbols_count = len(ignored)
         out = apply_scan_cap(pool)
-        self._log_debug("symbol_pool_active", zero_fee_cache=len(self.zero_fee_cache), pool_count=len(pool), returned=len(out), ignored=len(ignored), allowed_filter=bool(allowed_set), scan_cap=(int(s.get("max_zero_fee_scan_symbols") or 0) or "ALL"), first_symbols=out[:30])
+        # Keep the raw/blocked diagnostics from the last rescan, but refresh the
+        # usable and returned scan counts every loop because allowed/ignore/cap can change.
+        if not self.stats.zero_fee_total_count:
+            self.stats.zero_fee_total_count = len(self.zero_fee_cache)
+        self.stats.zero_fee_universe_count = len(pool)
+        self.stats.zero_fee_scan_count = len(out)
+        self.stats.ignored_symbols_count = len(ignored)
+        self._log_debug("symbol_pool_active", zero_fee_total=self.stats.zero_fee_total_count, blocked=self.stats.zero_fee_blocked_count, zero_fee_cache=len(self.zero_fee_cache), pool_count=len(pool), returned=len(out), ignored=len(ignored), allowed_filter=bool(allowed_set), scan_cap=(int(s.get("max_zero_fee_scan_symbols") or 0) or "ALL"), first_symbols=out[:30])
         return out
 
     async def _refresh_market_scan(self, s: dict[str, Any], force: bool = False) -> list[dict[str, Any]]:
@@ -1281,7 +1361,7 @@ class MicroMakerEngine:
                 if not bias:
                     try:
                         em = await self._edge_metrics(sym, s, book)
-                        # v0046: avoid TypeError from duplicate bid/ask/depth keys
+                        # v0049: avoid TypeError from duplicate bid/ask/depth keys
                         # when edge metrics are merged into scan detail.
                         for _k in ("bid", "ask", "spread_ticks", "depth_bid", "depth_ask", "depth_min", "imbalance", "source"):
                             em.pop(_k, None)
@@ -1312,7 +1392,7 @@ class MicroMakerEngine:
                     em, top_score, micro_score = {}, 0.0, 0.0
                 move_ticks, move_age = self._recent_move_ticks(sym, float(s.get("wave_lookback_sec") or s.get("basket_rebound_lookback_sec") or 20.0), tick)
                 move_pct, move_pct_age = vote_move_pct, vote_age
-                # v0046: score is no longer the market-direction source. Keep it only
+                # v0049: score is no longer the market-direction source. Keep it only
                 # as secondary display/ranking; the wave detector uses move_pct votes.
                 wave_score = min(abs(float(move_pct or 0.0)) * 120.0, 30.0) if bool(s.get("wave_basket_enabled", False)) else 0.0
                 score = depth_score + spread_score + imbalance_score + volume_score + top_score + micro_score + wave_score
@@ -1356,7 +1436,7 @@ class MicroMakerEngine:
             scored = [r for r in scored if float(r.get("score") or 0) >= min_score]
             if before_count > len(scored):
                 reject_counts["score"] = reject_counts.get("score", 0) + (before_count - len(scored))
-        # v0046: denominator must be the whole selected universe. If a symbol has
+        # v0049: denominator must be the whole selected universe. If a symbol has
         # no fresh WS book / no 10s price history / scan error, count it as NEUTRAL
         # instead of silently shrinking 377 coins into e.g. 352 votes.
         voted_symbols = {MexcFuturesClient.contract_id(r.get("symbol")) for r in wave_vote_rows if r.get("symbol")}
@@ -1496,7 +1576,7 @@ class MicroMakerEngine:
     def _recent_move_pct(self, symbol: str, lookback_sec: float) -> tuple[float | None, float]:
         """Return mid-price percent move over lookback window, plus sample age.
 
-        v0046 Wave Price Tsunami Basket deliberately uses this simple fact instead of
+        v0049 Wave Price Tsunami Basket deliberately uses this simple fact instead of
         internal score: price now versus price N seconds ago.
         """
         sid = MexcFuturesClient.contract_id(symbol)
@@ -1629,7 +1709,7 @@ class MicroMakerEngine:
         else:
             forced = None
 
-        # v0046 Wave Price Tsunami Basket: market direction is not taken from the old
+        # v0049 Wave Price Tsunami Basket: market direction is not taken from the old
         # book score. A coin votes LONG when its mid-price rose over the price
         # lookback, SHORT when it fell. This makes the wave detector transparent:
         # count rose/fell coins every ~10 seconds, then fire the basket.
@@ -1759,7 +1839,7 @@ class MicroMakerEngine:
         return picked
 
     def _detect_wave_signal(self, rows: list[dict[str, Any]], s: dict[str, Any]) -> tuple[str | None, list[dict[str, Any]], dict[str, Any]]:
-        """Detect v0046 Price Tsunami from the full active market vote.
+        """Detect v0049 Price Tsunami from the full active market vote.
 
         Exact rules:
         - Normal Wave: dominance >= 75% and 60s рост < +15п.п..
@@ -1823,7 +1903,46 @@ class MicroMakerEngine:
         is_tsunami = dominance >= normal_ratio and accel >= accel_trigger
         is_normal = dominance >= normal_ratio and accel < accel_trigger
         is_early = dominance >= early_ratio and dominance < normal_ratio and dominance > opposite and accel >= accel_trigger
-        mode = "tsunami" if is_tsunami else ("normal" if is_normal else ("early" if is_early else "wait"))
+        raw_mode = "tsunami" if is_tsunami else ("normal" if is_normal else ("early" if is_early else "wait"))
+
+        # v0049 HOLD rule: +15p.p. must be stable, not a one-scan spike.
+        # Default rule: 4 of the last 5 sampled checks over about 10 seconds.
+        # This is stronger than the old 3/3s hold and tolerant to one noisy failed check.
+        hold_checks = max(1, int(s.get("wave_signal_hold_checks") or 5))
+        hold_required = max(1, min(hold_checks, int(s.get("wave_signal_hold_required") or max(1, hold_checks - 1))))
+        hold_sec = max(0.0, float(s.get("wave_signal_hold_sec") or 10.0))
+        hold_key = f"{raw_mode}:{side}" if raw_mode != "wait" else None
+        sample_key = hold_key or "wait"
+        # Spread 5 hold samples across the configured hold window. The run loop is faster
+        # than the market scan, so sampling every tick would make check counts meaningless.
+        sample_gap = hold_sec / max(1, hold_checks - 1) if hold_sec > 0 else max(0.2, float(s.get("scan_interval_sec") or 1.0))
+        sample_gap = max(0.2, sample_gap)
+        last_sample_key = self.wave_signal_hold_samples[-1][1] if self.wave_signal_hold_samples else None
+        if (not self.wave_signal_hold_samples) or (sample_key != last_sample_key) or (now - self.wave_signal_hold_last_sample_ts >= sample_gap):
+            self.wave_signal_hold_samples.append((now, sample_key))
+            self.wave_signal_hold_last_sample_ts = now
+        retention = max(hold_sec * 3.0, 60.0)
+        self.wave_signal_hold_samples = [x for x in self.wave_signal_hold_samples[-100:] if x[0] >= now - retention]
+        recent_samples = self.wave_signal_hold_samples[-hold_checks:]
+        recent_keys = [x[1] for x in recent_samples]
+        hold_match_count = sum(1 for k in recent_keys if hold_key and k == hold_key)
+        hold_for = 0.0
+        if len(recent_samples) >= hold_checks:
+            hold_for = max(0.0, recent_samples[-1][0] - recent_samples[0][0])
+        self.wave_signal_hold_key = hold_key
+        self.wave_signal_hold_count = hold_match_count
+        if hold_key and any(k == hold_key for k in recent_keys):
+            first_match = next((ts for ts, key in recent_samples if key == hold_key), now)
+            self.wave_signal_hold_since = first_match
+        else:
+            self.wave_signal_hold_since = 0.0
+        signal_stable = (
+            raw_mode != "wait"
+            and len(recent_samples) >= hold_checks
+            and hold_match_count >= hold_required
+            and hold_for >= hold_sec
+        )
+        mode = raw_mode if signal_stable else "wait"
 
         side_rows = [r for r in rows if r.get("bias") == side and r.get("move_pct") is not None]
         target_profit = float(s.get("wave_tsunami_target_profit_usdt") or 0.10) if is_tsunami else float(s.get("wave_normal_target_profit_usdt") or s.get("wave_target_profit_usdt") or 0.05)
@@ -1850,6 +1969,15 @@ class MicroMakerEngine:
             "early_ratio": early_ratio,
             "accel_trigger": accel_trigger,
             "mode": mode,
+            "detected_mode": raw_mode,
+            "pending_mode": raw_mode if raw_mode != "wait" and not signal_stable else "",
+            "pending_side": side if raw_mode != "wait" and not signal_stable else "",
+            "signal_hold_count": self.wave_signal_hold_count,
+            "signal_hold_need": hold_required,
+            "signal_hold_required": hold_required,
+            "signal_hold_checks": hold_checks,
+            "signal_hold_for": hold_for,
+            "signal_hold_sec": hold_sec,
             "need": need,
             "trade_candidates": len(side_rows),
             "target": target_profit,
@@ -1858,6 +1986,15 @@ class MicroMakerEngine:
         self.stats.wave_state = {
             "side": side,
             "mode": mode,
+            "detected_mode": raw_mode,
+            "pending_mode": raw_mode if raw_mode != "wait" and not signal_stable else "",
+            "pending_side": side if raw_mode != "wait" and not signal_stable else "",
+            "signal_hold_count": self.wave_signal_hold_count,
+            "signal_hold_need": hold_required,
+            "signal_hold_required": hold_required,
+            "signal_hold_checks": hold_checks,
+            "signal_hold_for": hold_for,
+            "signal_hold_sec": hold_sec,
             "dominance": dominance,
             "acceleration": accel,
             "long_acceleration": accel_long,
@@ -1882,7 +2019,12 @@ class MicroMakerEngine:
         if mode == "wait":
             self.wave_candidate_side = None
             self.wave_candidate_count = 0
+            if raw_mode != "wait" and not signal_stable:
+                details["reason"] = f"signal_hold: {self.wave_signal_hold_count}/{hold_required} of last {hold_checks} checks, {hold_for:.1f}/{hold_sec:.1f}s"
+                self.stats.wave_state["reason"] = details["reason"]
+                return None, [], details
             details["reason"] = "нет 65% + ускорения и нет 75% dominance"
+            self.stats.wave_state["reason"] = details["reason"]
             return None, [], details
         if len(side_rows) < need:
             self.wave_candidate_side = None
@@ -2019,7 +2161,7 @@ class MicroMakerEngine:
             self._remember_wave_open_skip(symbol, "no_margin", margin_note=margin_note)
             self._log_event("wave_open_no_margin", symbol=symbol, margin_note=margin_note)
             return None
-        # v0046: aggressive entry means: choose a price that already exists in
+        # v0049: aggressive entry means: choose a price that already exists in
         # the opposite side of the book and has enough cumulative liquidity for
         # this slot. We do NOT place a passive maker order and wait in queue.
         # LONG consumes asks; SHORT consumes bids. If the best level is enough,
@@ -2223,7 +2365,7 @@ class MicroMakerEngine:
         self._log_event("wave_cycle_start", side=side, symbols=symbols, target=target, leverage=s.get("leverage"), signal=signal, equity_before=equity_before)
         wave_slots = int(s.get("wave_positions") or 5)
         order_symbols = symbols[:wave_slots]
-        # v0046: the first 5 picks can become stale while the controlled burst is
+        # v0049: the first 5 picks can become stale while the controlled burst is
         # opening. If a slot is skipped because the coin flipped side, spread widened,
         # or the order did not fill, immediately top up from a fresh same-side scan
         # instead of accepting a 2/5 basket. MEXC throttle/rate-limit errors
@@ -2321,7 +2463,7 @@ class MicroMakerEngine:
             self.stats.last_action = f"PARTIAL {side.upper()} basket: opened {len(opened)}/{wave_slots}; replaced stale slots but still not full"
             self._log_event("wave_cycle_partial", filled=len(opened), target_slots=wave_slots, symbols=[p.get("symbol") for p in opened], skipped=skipped[-12:], attempts=open_attempts)
 
-        # v0046: if MEXC charged real fees despite the zero-fee universe, do not
+        # v0049: if MEXC charged real fees despite the zero-fee universe, do not
         # instantly kill the position. Instead raise the basket NET target so the
         # cycle only closes after fees + a real profit buffer are covered.
         entry_fee_sum = sum(self._position_fee_usdt(p) for p in opened)
@@ -2585,7 +2727,7 @@ class MicroMakerEngine:
         await self._manage_position(symbol, direction, pos, s, equity_before=equity_before)
 
     async def _manage_basket_position(self, symbol: str, direction: str, pos: dict[str, Any], s: dict[str, Any], equity_before: float | None = None) -> None:
-        """v0046 Wave Price Tsunami Basket manager.
+        """v0049 Wave Price Tsunami Basket manager.
 
         No per-position stop. A position is closed only with a maker close order
         when the configured positive basket target is reachable. After the task
@@ -2657,7 +2799,7 @@ class MicroMakerEngine:
             active_target_ticks = max(1, int(math.ceil(active_target_usdt / max(tick_value, 1e-12))))
             target_price = entry + active_target_ticks * tick if direction == "long" else entry - active_target_ticks * tick
 
-            # v0046 rotation: after the stale timeout, stop waiting for +$0.01.
+            # v0049 rotation: after the stale timeout, stop waiting for +$0.01.
             # The close order is downgraded to breakeven/small-profit so the slot can
             # rotate into a better coin. This is not a stop; it does not cross a loss.
             if direction == "long":
