@@ -100,10 +100,10 @@ def b(text: str, data: str) -> InlineKeyboardButton:
 
 def main_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [b("▶️ Start LIVE", "mm:start"), b("⏸ Stop", "mm:stop")],
+        [b("▶️ Start Tsunami", "mm:start"), b("⏸ Stop/Pause", "mm:stop")],
         [b("❌ Close All", "mm:close_all"), b("📒 Trades", "mm:trades")],
-        [b("📊 Live Panel", "menu:main"), b("🔍 Scan Now", "mm:scan")],
-        [b("⚙️ Settings", "menu:settings"), b("📈 Scanner/Symbols", "menu:symbols")],
+        [b("📊 Panel", "menu:main"), b("🔍 Price Scan", "mm:scan")],
+        [b("⚙️ Settings", "menu:settings"), b("📈 Symbols", "menu:symbols")],
         [b("🔑 API", "menu:api"), b("🧾 Fees", "mm:fees")],
     ])
 
@@ -210,48 +210,39 @@ def ping_text(update: Update | None = None, started_perf: float | None = None) -
 def settings_text() -> str:
     s = STORE.load()
     return (
-        f"⚙️ Micro Maker Settings ({s.get('bot_version', 'v0028')})\n\n"
-        f"Leverage: {s['leverage']}x\n"
-        f"Max positions: {s['max_positions']}\n"
-        f"Symbols limit: {s['symbols_limit']}\n"
-        f"Position size: {s.get('position_margin_percent', 10)}% of TOTAL USDT equity\n"
-        f"Fallback fixed margin: {s['margin_per_position_usdt']} USDT\n"
-        f"Target ticks: {s['target_ticks']}\n"
-        f"Stop ticks: {s['stop_ticks']}\n"
-        f"Profile: {s.get('trade_profile', '-')} | Min score: {s.get('min_trade_score', 0)} | Recheck: {s.get('entry_recheck_ms', 0)}ms × {s.get('entry_recheck_count', 1)}\n"
-        f"Order lifetime: {s['order_lifetime_ms']} ms\n"
-        f"Requote: {s['requote_interval_ms']} ms\n"
-        f"Panel: normal {s.get('telegram_live_update_sec')}s | open {s.get('telegram_live_fast_update_sec')}s | stopped {'OFF' if float(s.get('telegram_live_stopped_update_sec') or 0) <= 0 else str(s.get('telegram_live_stopped_update_sec')) + 's'}\n"
-        f"MEXC REST: {s.get('mexc_rest_base')} | recv {s.get('mexc_recv_window')} | rate {s.get('mexc_private_rate_limit')}/2s\n"
-        f"MEXC WS: {s.get('mexc_futures_ws')}\n"
-        f"Direction: {s['direction_mode']}\n"
-        f"Post-only close: {'ON' if s['post_only_close'] else 'OFF'}\n"
-        f"Emergency market close: {'ON' if s['emergency_market_close'] else 'OFF'} | Time-stop market: {'ON' if s.get('emergency_market_close_on_time_stop') else 'OFF'}\n"
-        f"Cooldown: loss {s.get('cooldown_after_loss_sec', 0)}s | after trade {s.get('cooldown_after_trade_sec', 0)}s | UTC offset +{s.get('telegram_time_offset_hours', 0)}h\n"
-        f"Full log: last {s.get('full_log_retention_minutes', 20)} min | max {s.get('full_log_export_max_mb', 8)} MB\n\n"
-        "Команды: /set leverage 5, /set size 10, /close_all"
+        f"⚙️ Price Tsunami Settings ({s.get('bot_version', 'v0046')})\n\n"
+        f"Active scan: ALL zero-fee *_USDT монеты | lookback {s.get('wave_price_lookback_sec')}s | WS ALL symbols\n"
+        f"Votes: price up = LONG, price down = SHORT, flat/no fresh price = NEUTRAL\n"
+        f"Denominator: проценты считаются от всего выбранного universe; монеты без свежей цены не выкидываются, а идут в NEUTRAL.\n"
+        f"Early Wave: текущие >= {float(s.get('wave_early_min_side_ratio') or 0.65):.0%} и эта же сторона выросла на +{float(s.get('wave_accel_trigger_pct') or 15):.0f}п.п. за {float(s.get('wave_accel_lookback_sec') or 60):.0f}s → 5 сделок, 5x, NET +${float(s.get('wave_normal_target_profit_usdt') or 0.05):.2f}\n"
+        f"Normal Wave: текущие >= {float(s.get('wave_min_side_ratio') or 0.75):.0%} → 5 сделок, 5x, NET +${float(s.get('wave_normal_target_profit_usdt') or 0.05):.2f}\n"
+        f"Tsunami: текущие >= {float(s.get('wave_min_side_ratio') or 0.75):.0%} и эта же сторона выросла на +{float(s.get('wave_accel_trigger_pct') or 15):.0f}п.п. → 5 сделок, 10x, NET +${float(s.get('wave_tsunami_target_profit_usdt') or 0.10):.2f}\n"
+        "Важно: 65%/75% — это текущее итоговое значение; +15п.п. уже внутри него, это не 65+15.\n\n"
+        f"Basket: {s.get('wave_positions')} slots | size {s.get('position_margin_percent')}% equity на слот | isolated\n"
+        f"Pick range: middle {float(s.get('wave_pick_start_pct') or 0.25):.0%}-{float(s.get('wave_pick_end_pct') or 0.60):.0%} of same-side candidates\n"
+        f"Open retry: 5 сделок открываются с паузой {float(s.get('wave_open_batch_gap_ms') or 0)/1000:.1f}s; при MEXC rate-limit бот ждёт {float(s.get('wave_open_retry_delay_sec') or 0):.1f}s и повторяет до {s.get('wave_open_retry_rounds')} раз, потом добирает replacement.\n"
+        f"After 10m: close only zero/microplus; if minus, wait recovery.\n"
+        f"Stop: pause only. Close All: cancel orders + close positions.\n\n"
+        "Команды: /set size 20, /set candidates 0, /set ws_symbols 0, /set panel_sec 5, /symbols clear"
     )
-
 
 def settings_menu() -> InlineKeyboardMarkup:
     s = STORE.load()
     return InlineKeyboardMarkup([
-        [b(("✅ " if s['leverage'] == 5 else "") + "5x", "set:leverage:5"), b(("✅ " if s['leverage'] == 10 else "") + "10x", "set:leverage:10")],
-        [b("Pos 1", "set:max_positions:1"), b("Pos 2", "set:max_positions:2"), b("Pos 3", "set:max_positions:3")],
-        [b("Symbols 1", "set:symbols_limit:1"), b("Symbols 2", "set:symbols_limit:2"), b("Symbols 3", "set:symbols_limit:3")],
+        [b(("✅ " if s.get('wave_normal_leverage') == 5 else "") + "5x normal", "set:wave_normal_leverage:5"), b(("✅ " if s.get('wave_tsunami_leverage') == 10 else "") + "10x tsunami", "set:wave_tsunami_leverage:10")],
+        [b("✅ Basket 5", "set:wave_positions:5"), b("Scan ALL", "set:max_zero_fee_scan_symbols:0"), b("WS ALL", "set:ws_depth_max_symbols:0")],
+        [b("Early 65%", "set:wave_early_min_side_ratio:0.65"), b("Normal 75%", "set:wave_min_side_ratio:0.75"), b("Ускор. 15п.п.", "set:wave_accel_trigger_pct:15")],
         [
             b(("✅ " if float(s.get('position_margin_percent') or 0) == 5 else "") + "Size 5%", "set:position_margin_percent:5"),
             b(("✅ " if float(s.get('position_margin_percent') or 0) == 10 else "") + "Size 10%", "set:position_margin_percent:10"),
             b(("✅ " if float(s.get('position_margin_percent') or 0) == 15 else "") + "Size 15%", "set:position_margin_percent:15"),
             b(("✅ " if float(s.get('position_margin_percent') or 0) == 20 else "") + "Size 20%", "set:position_margin_percent:20"),
         ],
-        [b("TP 1 tick", "set:target_ticks:1"), b("TP 2 ticks", "set:target_ticks:2"), b("TP 3 ticks", "set:target_ticks:3")],
-        [b("SL 1 tick", "set:stop_ticks:1"), b("SL 2 ticks", "set:stop_ticks:2"), b("SL 3 ticks", "set:stop_ticks:3")],
-        [b("Life 350ms", "set:order_lifetime_ms:350"), b("Life 700ms", "set:order_lifetime_ms:700"), b("Life 1200ms", "set:order_lifetime_ms:1200")],
+        [b("NET +$0.05", "set:wave_normal_target_profit_usdt:0.05"), b("Tsunami +$0.10", "set:wave_tsunami_target_profit_usdt:0.10"), b("Pick 25-60", "set:wave_pick_start_pct:0.25")],
         [b("Panel 2s", "set:telegram_live_update_sec:2"), b("Panel 5s", "set:telegram_live_update_sec:5"), b("Panel 10s", "set:telegram_live_update_sec:10"), b("Stopped OFF", "set:telegram_live_stopped_update_sec:0")],
         [b("Dir BOTH", "set:direction_mode:both"), b("LONG", "set:direction_mode:long"), b("SHORT", "set:direction_mode:short")],
         [b("Emergency ON/OFF", "toggle:emergency_market_close"), b("Post-close ON/OFF", "toggle:post_only_close")],
-        [b("🌊 Price Tsunami Basket v0037", "preset:plus"), b("Custom mode", "preset:custom")],
+        [b("🌊 Price Tsunami Basket v0046", "preset:plus"), b("Custom mode", "preset:custom")],
         [b("⬅️ Back to Live", "menu:main")],
     ])
 
@@ -271,7 +262,7 @@ def symbols_text() -> str:
         f"Manual fee fallback: {'ON' if s.get('allow_manual_fee_fallback') else 'OFF'}\n"
         f"Scan interval: {s.get('scan_interval_sec')} sec\n"
         f"Zero-fee universe rescan: {s.get('zero_fee_rescan_sec')} sec\n"
-        f"Zero-fee universe cap: {universe_txt} | Active candidates to score: {s.get('max_zero_fee_scan_symbols')}\n"
+        f"Zero-fee universe cap: {universe_txt} | Active price scan cap: {('ALL' if int(s.get('max_zero_fee_scan_symbols') or 0) <= 0 else s.get('max_zero_fee_scan_symbols'))}\n"
         f"Ignored symbols: {ignored_count}\n"
         f"Min spread: {s.get('min_spread_ticks')} ticks | Max spread: {s.get('max_spread_ticks')} ticks\n"
         f"Min imbalance: {s.get('min_imbalance_ratio')} | Min score: {s.get('min_trade_score')}\n"
@@ -288,11 +279,11 @@ def symbols_text() -> str:
 def symbols_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [b("Auto-select ON/OFF", "toggle:auto_select_symbols"), b("ZeroFee ON/OFF", "toggle:only_zero_fee")],
-        [b("Manual fallback ON/OFF", "toggle:allow_manual_fee_fallback"), b("🔍 Scan Now", "mm:scan")],
+        [b("Manual fallback ON/OFF", "toggle:allow_manual_fee_fallback"), b("🔍 Price Scan", "mm:scan")],
         [b("WS ON/OFF", "toggle:ws_depth_enabled"), b("MD WS", "set:market_data_mode:websocket"), b("MD REST", "set:market_data_mode:rest")],
         [b("Scan 1s", "set:scan_interval_sec:1"), b("Scan 3s", "set:scan_interval_sec:3"), b("Scan 5s", "set:scan_interval_sec:5")],
-        [b("Candidates 30", "set:max_zero_fee_scan_symbols:30"), b("60", "set:max_zero_fee_scan_symbols:60"), b("100", "set:max_zero_fee_scan_symbols:100")],
-        [b("WS 30", "set:ws_depth_max_symbols:30"), b("WS 60", "set:ws_depth_max_symbols:60"), b("WS 100", "set:ws_depth_max_symbols:100")],
+        [b("Scan ALL", "set:max_zero_fee_scan_symbols:0"), b("Cap 250", "set:max_zero_fee_scan_symbols:250"), b("Cap 100", "set:max_zero_fee_scan_symbols:100")],
+        [b("WS ALL", "set:ws_depth_max_symbols:0"), b("WS 250", "set:ws_depth_max_symbols:250"), b("WS 100", "set:ws_depth_max_symbols:100")],
         [b("Rescan 60s", "set:zero_fee_rescan_sec:60"), b("Clear ignore", "ignore:clear")],
         [b("Depth $50", "set:min_depth_usdt:50"), b("$75", "set:min_depth_usdt:75"), b("$100", "set:min_depth_usdt:100")],
         [b("Depth x3", "set:min_depth_multiplier:3"), b("x4", "set:min_depth_multiplier:4"), b("x5", "set:min_depth_multiplier:5")],
@@ -339,14 +330,19 @@ def panel_text(engine: MicroMakerEngine | None = None) -> str:
         return e.quick_status_text()
     s = STORE.load()
     return (
-        f"🤖 MEXC Micro Maker LIVE {s.get('bot_version', 'v0028')}\n"
+        f"🌊 Price Tsunami {s.get('bot_version', 'v0046')}\n"
         "State: STOPPED\n\n"
-        f"⚙️ {s.get('leverage')}x | Size: {s.get('position_margin_percent', 10)}% total | "
-        f"Pos: {s.get('max_positions')} | Symbols: {s.get('symbols_limit')}\n"
-        f"📒 Total trades: {int(s.get('total_trades_count') or 0)} | + / -: {int(s.get('total_wins_count') or 0)}/{int(s.get('total_losses_count') or 0)}\n"
-        "Нажми ▶️ Start LIVE для запуска."
+        "PRICE SCAN 10s: пока нет данных.\n"
+        "LONG 0% | SHORT 0% | NEUTRAL 0%\n"
+        "Вывод: сидим в засаде, сделки не открываем.\n\n"
+        "Правила:\n"
+        "Early: сейчас >=65% и эта же сторона выросла на +15п.п. за 60s → 5 сделок, 5x, NET +$0.05\n"
+        "Normal: сейчас >=75% стороны → 5 сделок, 5x, NET +$0.05\n"
+        "Tsunami: сейчас >=75% и эта же сторона выросла на +15п.п. за 60s → 5 сделок, 10x, NET +$0.10\n"
+        "65/75 — итог сейчас; +15п.п. уже внутри этих процентов.\n\n"
+        "Stop = пауза, позиции/ордера не трогает. Close All = снести всё.\n"
+        "Нажми ▶️ Start Tsunami."
     )
-
 
 async def safe_delete_message(context: ContextTypes.DEFAULT_TYPE, update: Update, *, retries: bool = False) -> bool:
     s = STORE.load()
@@ -637,7 +633,7 @@ async def preset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     apply_plus_profile()
     engine = await ensure_engine(context, chat_id)
     engine.clear_ignored_symbols()
-    await upsert_panel(context, chat_id, "🧺 Price Tsunami v0037 Fast UI применён: price-vote dominance/acceleration: 5 позиций разом, 5x/10x по силе волны, NET-выход.\n\n" + settings_text(), settings_menu(), mode="settings")
+    await upsert_panel(context, chat_id, "🌊 Price Tsunami v0046 применён: 10s price-scan, итоговые 65/75% + рост 15п.п., 5 LONG/SHORT, 5x/10x, REAL NET выход.\n\n" + settings_text(), settings_menu(), mode="settings")
 
 
 async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -897,67 +893,26 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await install_command_keyboard(context, chat_id)
     s = STORE.load()
     txt = (
-        f"🆘 Help — MEXC Micro Maker {s.get('bot_version', 'v0028')}\n\n"
-        "Как запустить в один клик:\n"
-        "1) Один раз сохрани API: /api set API_KEY API_SECRET\n"
-        "2) Нажми ▶️ Start LIVE на live-панели. По умолчанию включены автоторговля, FULL AUTO поиск монет и OnlyZeroFee.\n\n"
-        "Обычные кнопки Telegram:\n"
-        "/start — открыть/пересоздать live-панель и показать обычные кнопки\n"
-        "/menu — то же самое, что /start\n"
-        "/ping — отклик, Telegram lag, память, uptime, версия\n"
-        "/balance — баланс USDT и открытые позиции\n"
-        "/status — полный статус стратегии, сканера, PnL и позиций\n"
-        "/trades — счётчик сделок: сессия и общий total после рестартов\n"
-        "/log_full — прислать .txt файл с полным debug-логом: ошибки, скан монет, переключения, ордера, закрытия, API-события\n"
-        "/log_full clear — очистить полный debug-лог\n"
-        "/panel — показать live-панель\n"
-        "/panel reset — удалить старую live-панель и создать новую\n"
-        "/panel delete — удалить live-панель\n"
-        "/help — эта инструкция\n\n"
-        "Торговля и аварийные действия:\n"
-        "/close_all или /closeall — остановить бота, отменить все активные/лимитные/plan/stop ордера и закрыть все позиции market\n"
-        "Кнопка ⏸ Stop — пауза: останавливает торговый цикл и фоновый скан, позиции market не закрывает.\n"
-        "Кнопка ❌ Close All — полная очистка биржи: ордера снести, позиции закрыть market.\n\n"
-        "Coolify ENV:\n"
-        "В Coolify нужны только TELEGRAM_BOT_TOKEN и ADMIN_IDS. Остальные MEXC/сканер/риск настройки уже заданы по умолчанию и меняются через Telegram.\n\n"
-        "API:\n"
-        "/api set API_KEY API_SECRET — сохранить MEXC API; сообщение с ключами остаётся в чате\n"
-        "/api status — показать, сохранены ли ключи\n"
-        "/api clear — удалить API-ключи из настроек\n\n"
-        "Монеты и сканер:\n"
-        "/symbols clear — FULL AUTO: бот сам ищет лучшие API-confirmed zero-fee пары\n"
-        "/symbols LINK_USDT,SOL_USDT — whitelist: выбирать лучшую только из этих монет\n"
-        "/ignore — показать ignored symbols: региональные запреты, unsupported, min/max margin/volume rejects\n"
-        "/ignore clear — очистить ignored symbols и заново допустить проверку этих монет\n"
-        "🔍 Scan Now — вручную пересканировать рынок сейчас; в этом окне тоже виден счётчик сделок\n"
-        "📒 Trades — открыть счётчик сделок\n"
-        "/trades reset — сбросить общий счётчик total, если нужно начать статистику заново\n"
-        "/log_full — выгрузить полный .txt лог для поиска ошибок\n"
-        "/log_full clear — очистить полный лог\n\n"
-        "Настройки:\n"
-        "/set leverage 5 или /set leverage 10 — плечо\n"
-        "/set size 20 — одна сделка = 20% от TOTAL USDT equity для теста 12 USDT\n"
-        "/set positions 1 — максимум открытых позиций\n"
-        "/set symbols 1 — сколько монет торговать одновременно\n"
-        "/set tp 1 — тейк в тиках\n"
-        "/set sl 3 — виртуальный стоп в тиках\n"
-        "/set scan 5 — интервал быстрого автоскана в секундах\n"
-        "/set rescan 60 — каждые 60 секунд пересобирать zero-fee universe\n"
-        "/set candidates 80 — сколько активных zero-fee монет держать в быстром WS/scoring окне\n"
-        "/set panel_sec 5 — обычная частота live-сообщения\n"
-        "/set panel_fast_sec 2 — частота, когда есть открытая позиция\n"
-        "/set panel_stopped_sec 0 — не обновлять панель в STOPPED\n"
-        "/set rest_base https://api.mexc.com — MEXC REST endpoint\n"
-        "/set recv 20000 — recv-window по умолчанию\n"
-        "/set rate 8 — private API лимит на 2 секунды внутри бота\n"
-        "/set public_timeout 6 — timeout публичных REST-запросов\n"
-        "/set private_timeout 15 — timeout приватных REST-запросов\n"
-        "/set strict_leverage on — ошибка плеча блокирует сделку, off — не блокирует\n"
-        "/set ws_endpoint wss://contract.mexc.com/edge — MEXC futures WS endpoint\n\n"
-        "Кеш в v0028: zero-fee universe пересобирается каждые 60 секунд; если rescan упал, рабочий список не стирается. "
-        "Монеты, которые регионально запрещены, unsupported или не проходят min/max margin/volume, автоматически уходят в ignore.\n\n"
-        "Важно: стопы/тейки виртуальные, их исполняет сам бот. Если процесс выключен, виртуальная защита не работает. "
-        "Для полной очистки всегда используй ❌ Close All или /close_all."
+        f"🆘 Price Tsunami Help — {s.get('bot_version', 'v0046')}\n\n"
+        "Логика торговли:\n"
+        "1) Бот держит ALL active zero-fee *_USDT universe, без лимита 250.\n"
+        "2) Каждые ~10 секунд сравнивает mid-price каждой монеты.\n"
+        "3) Считает рынок: LONG %, SHORT %, NEUTRAL %. Проценты от всего universe; если по монете нет свежей цены/истории — она считается NEUTRAL, а не пропадает из знаменателя.\n"
+        "4) Если перевес слабый — ничего не открывает.\n\n"
+        "Режимы входа:\n"
+        "Early Wave: сейчас >=65% одной стороны и эта же сторона выросла на +15п.п. за 60s → 5 сделок, 5x, REAL NET TP +$0.05.\n"
+        "Normal Wave: сейчас >=75% одной стороны → 5 сделок, 5x, REAL NET TP +$0.05.\n"
+        "Tsunami: сейчас >=75% и эта же сторона выросла на +15п.п. за 60s → 5 сделок, 10x, REAL NET TP +$0.10.\n"
+        "Важно: 65% и 75% — текущий итоговый процент; +15п.п. уже внутри этого значения, это не 65+15.\n\n"
+        "Выбор монет: не самый перегретый топ, а середина 25-60% same-side candidates.\n"
+        "Все сделки открываются одной стороной: либо 5 LONG, либо 5 SHORT. Если MEXC режет быстрые заявки, бот ждёт и повторяет те же слоты, затем добирает заменами.\n"
+        "Закрытие: вся корзина по REAL NET equity PnL. Через 10 минут закрывает только ноль/микроплюс; минус не режет, ждёт восстановления.\n\n"
+        "Кнопки:\n"
+        "▶️ Start Tsunami — запустить режим.\n"
+        "⏸ Stop/Pause — только пауза, позиции и ордера не трогает.\n"
+        "❌ Close All — отменяет ордера и закрывает позиции market.\n"
+        "🔍 Price Scan — показать текущие LONG/SHORT/NEUTRAL и вывод.\n\n"
+        "Команды: /api set KEY SECRET, /balance, /status, /log_full, /symbols clear, /set size 20, /set candidates 0."
     )
     await upsert_panel(context, chat_id, txt, main_menu(), mode="main")
 
@@ -991,7 +946,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         elif data == "mm:close_all":
             await q.answer("❌ Close All запущен")
         elif data == "mm:start":
-            await q.answer("▶️ Start принят")
+            await q.answer("▶️ Start Tsunami принят")
         else:
             await q.answer()
     except TelegramError:
@@ -1052,7 +1007,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             s = STORE.load()
             client = MexcFuturesClient(s.get("mexc_api_key"), s.get("mexc_api_secret"), settings=s)
             await client.sync_time()
-            zeros = await client.verified_zero_fee_symbols(int(s.get("max_zero_fee_scan_symbols") or 80))
+            zeros = await client.verified_zero_fee_symbols(int(s.get("zero_fee_universe_max_symbols") or 0))
             return "🧾 API zero-fee symbols:\n" + (", ".join(zeros) if zeros else "Не нашёл API-подтверждённые zero-fee пары.")
         await edit_query_as_panel(q, "🧾 Fees принят, проверяю API в фоне...", main_menu(), mode="api")
         spawn_ui_task(_finish_panel_task(context, chat_id, engine, fee_task(), main_menu(), mode="api"), name="ui_fees")
@@ -1068,7 +1023,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if data == "preset:plus":
         apply_plus_profile()
         engine.clear_ignored_symbols()
-        await edit_query_as_panel(q, "🧺 Price Tsunami v0037 Fast UI применён.\n\n" + settings_text(), settings_menu(), mode="settings")
+        await edit_query_as_panel(q, "🧺 Price Tsunami v0046 применён.\n\n" + settings_text(), settings_menu(), mode="settings")
         return
     if data == "preset:custom":
         STORE.set("trade_profile", "custom")

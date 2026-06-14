@@ -419,6 +419,46 @@ class MexcFuturesClient:
             }
         return result
 
+    async def active_usdt_symbols(self, max_symbols: int = 0) -> list[str]:
+        """Return active public *_USDT futures symbols.
+
+        This is used only when the user disables the zero-fee filter. In normal
+        Price Tsunami mode the scanner should use verified_zero_fee_symbols(0),
+        i.e. the full API-confirmed 0% fee universe with no 250-symbol cap.
+        """
+        symbols: list[str] = []
+        tickers: dict[str, dict[str, Any]] = {}
+        try:
+            tickers = await self.all_tickers()
+            symbols = [sym for sym in tickers.keys() if str(sym).upper().endswith("_USDT")]
+            symbols.sort(key=lambda x: float((tickers.get(x) or {}).get("quoteVolume") or 0.0), reverse=True)
+        except Exception as e:
+            log_error("mexc_active_usdt_symbols_ticker_failed", e)
+            symbols = []
+
+        if not symbols:
+            try:
+                details = await self._contract_details_all()
+                for sid, row in details.items():
+                    sid = self.contract_id(sid)
+                    if not sid.endswith("_USDT"):
+                        continue
+                    raw_state = row.get("state", row.get("status", row.get("enable", row.get("enabled", ""))))
+                    st = str(raw_state).strip().lower()
+                    # Keep unknown/0/true states, drop obvious inactive text states.
+                    if st in {"closed", "offline", "delisted", "suspended", "disabled", "false", "4"}:
+                        continue
+                    symbols.append(sid)
+                symbols = sorted(set(symbols))
+            except Exception as e:
+                log_error("mexc_active_usdt_symbols_detail_failed", e)
+                symbols = []
+
+        limit = int(max_symbols or 0)
+        out = symbols[:limit] if limit > 0 else symbols
+        log_event("mexc_active_usdt_symbols", total_active=len(symbols), returned=len(out), max_symbols=max_symbols, first_symbols=out[:30])
+        return out
+
     async def depth(self, symbol: str, limit: int = 20) -> dict[str, Any]:
         sid = self.contract_id(symbol)
         limit = max(5, min(int(limit or 20), 100))

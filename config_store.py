@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 DEFAULTS: dict[str, Any] = {
-    "bot_version": "v0037",
+    "bot_version": "v0046",
 
     # secrets are set from Telegram with /api set KEY SECRET. Telegram token stays in ENV.
     "mexc_api_key": "",
@@ -60,10 +60,10 @@ DEFAULTS: dict[str, Any] = {
     "contract_quote_filter": "USDT",
     "only_zero_fee": True,
     "allow_manual_fee_fallback": False,
-    "max_zero_fee_scan_symbols": 250,
+    "max_zero_fee_scan_symbols": 0,
     "scan_interval_sec": 1.0,
     "zero_fee_rescan_sec": 60.0,
-    # 0 = do not cap universe; active WS/scoring window is max_zero_fee_scan_symbols/ws_depth_max_symbols.
+    # 0 = ALL: do not cap the zero-fee universe, active price scan, or WS subscriptions.
     "zero_fee_universe_max_symbols": 0,
     "switch_score_improvement_pct": 5.0,
     "min_symbol_hold_sec": 5.0,
@@ -105,7 +105,7 @@ DEFAULTS: dict[str, Any] = {
     "max_entry_maker_fee_rate": 0.0,
     "max_entry_taker_fee_rate": 0.0,
     "fee_guard_ignore_symbol": True,
-    "trade_profile": "wave_price_tsunami_v0037",
+    "trade_profile": "wave_price_tsunami_v0046",
     "edge_filter_enabled": False,
     "entry_top_imbalance_ratio": 1.15,
     "entry_microprice_min_ticks": 0.10,
@@ -162,6 +162,12 @@ DEFAULTS: dict[str, Any] = {
     "wave_close_mode": "market",
     "wave_entry_post_only": False,
     "wave_entry_order_lifetime_ms": 450,
+    # v0046: aggressive entry must not wait in queue. Pick an existing book
+    # level with enough cumulative liquidity, place a normal LIMIT there,
+    # wait briefly, then cancel leftovers.
+    "wave_entry_book_sweep_levels": 5,
+    "wave_entry_liquidity_multiplier": 1.0,
+    "wave_entry_max_sweep_ticks": 3.0,
     "wave_min_filled_positions": 3,
     "wave_cooldown_after_cycle_sec": 20.0,
     "wave_require_leader_confirmation": False,
@@ -172,20 +178,24 @@ DEFAULTS: dict[str, Any] = {
     "wave_quality_score_required": 2,
     "wave_fee_target_multiplier": 2.4,
     "wave_fee_profit_buffer_usdt": 0.05,
-    "wave_parallel_open": True,
-    "wave_open_batch_gap_ms": 420,
-    "wave_open_retry_delay_sec": 1.25,
-    "wave_open_retry_rounds": 2,
+    "wave_parallel_open": False,
+    "wave_open_batch_gap_ms": 1000,
+    "wave_open_retry_delay_sec": 2.0,
+    "wave_open_retry_rounds": 4,
+    "wave_fill_topup_enabled": True,
+    "wave_fill_topup_rounds": 5,
+    "wave_open_max_attempts_multiplier": 5.0,
 
-    # v0037 Price Tsunami mode: ignore old internal score for market direction.
-    # Count how many active coins rose/fell over 10 seconds, then use 60-second
-    # dominance acceleration to catch an early market wave.
+    # v0046 Price Tsunami mode: global 10s price vote, clean early/normal/tsunami rules.
+    # Count how many ALL active zero-fee coins rose/fell over 10 seconds, then use 60-second
+    # dominance growth to catch an early market wave.
     "wave_price_vote_enabled": True,
     "wave_price_lookback_sec": 10.0,
     "wave_price_min_move_pct": 0.015,
     "wave_accel_lookback_sec": 60.0,
     "wave_accel_trigger_pct": 15.0,
     "wave_early_min_side_ratio": 0.65,
+    "wave_accel_min_side_ratio": 0.65,
     "wave_normal_target_profit_usdt": 0.05,
     "wave_tsunami_target_profit_usdt": 0.10,
     "wave_normal_leverage": 5,
@@ -200,7 +210,7 @@ DEFAULTS: dict[str, Any] = {
     # Fast market data. REST is used only as fallback/warmup; normal scanner/trade cycles use WS depth cache.
     "market_data_mode": "websocket",  # websocket | rest
     "ws_depth_enabled": True,
-    "ws_depth_max_symbols": 250,
+    "ws_depth_max_symbols": 0,
     "ws_book_stale_ms": 700,
     "ws_warmup_ms": 350,
     "rest_depth_fallback": True,
@@ -251,8 +261,8 @@ WAVE_HUNTER_PROFILE_V0032: dict[str, Any] = {
     "position_margin_percent": 20.0,
     "max_positions": 5,
     "symbols_limit": 5,
-    "max_zero_fee_scan_symbols": 250,
-    "ws_depth_max_symbols": 250,
+    "max_zero_fee_scan_symbols": 0,
+    "ws_depth_max_symbols": 0,
     "target_ticks": 0,
     "stop_ticks": 0,
     "order_lifetime_ms": 550,
@@ -289,7 +299,7 @@ WAVE_HUNTER_PROFILE_V0032: dict[str, Any] = {
     "max_entry_maker_fee_rate": 0.0,
     "max_entry_taker_fee_rate": 0.0,
     "fee_guard_ignore_symbol": True,
-    "trade_profile": "wave_price_tsunami_v0037",
+    "trade_profile": "wave_price_tsunami_v0046",
     "edge_filter_enabled": False,
     "entry_top_imbalance_ratio": 1.15,
     "entry_microprice_min_ticks": 0.10,
@@ -343,6 +353,12 @@ WAVE_HUNTER_PROFILE_V0032: dict[str, Any] = {
     "wave_close_mode": "market",
     "wave_entry_post_only": False,
     "wave_entry_order_lifetime_ms": 450,
+    # v0046: aggressive entry must not wait in queue. Pick an existing book
+    # level with enough cumulative liquidity, place a normal LIMIT there,
+    # wait briefly, then cancel leftovers.
+    "wave_entry_book_sweep_levels": 5,
+    "wave_entry_liquidity_multiplier": 1.0,
+    "wave_entry_max_sweep_ticks": 3.0,
     "wave_min_filled_positions": 3,
     "wave_cooldown_after_cycle_sec": 20.0,
     "wave_require_leader_confirmation": False,
@@ -353,20 +369,24 @@ WAVE_HUNTER_PROFILE_V0032: dict[str, Any] = {
     "wave_quality_score_required": 2,
     "wave_fee_target_multiplier": 2.4,
     "wave_fee_profit_buffer_usdt": 0.05,
-    "wave_parallel_open": True,
-    "wave_open_batch_gap_ms": 420,
-    "wave_open_retry_delay_sec": 1.25,
-    "wave_open_retry_rounds": 2,
+    "wave_parallel_open": False,
+    "wave_open_batch_gap_ms": 1000,
+    "wave_open_retry_delay_sec": 2.0,
+    "wave_open_retry_rounds": 4,
+    "wave_fill_topup_enabled": True,
+    "wave_fill_topup_rounds": 5,
+    "wave_open_max_attempts_multiplier": 5.0,
 
-    # v0037 Price Tsunami mode: ignore old internal score for market direction.
-    # Count how many active coins rose/fell over 10 seconds, then use 60-second
-    # dominance acceleration to catch an early market wave.
+    # v0046 Price Tsunami mode: global 10s price vote, clean early/normal/tsunami rules.
+    # Count how many ALL active zero-fee coins rose/fell over 10 seconds, then use 60-second
+    # dominance growth to catch an early market wave.
     "wave_price_vote_enabled": True,
     "wave_price_lookback_sec": 10.0,
     "wave_price_min_move_pct": 0.015,
     "wave_accel_lookback_sec": 60.0,
     "wave_accel_trigger_pct": 15.0,
     "wave_early_min_side_ratio": 0.65,
+    "wave_accel_min_side_ratio": 0.65,
     "wave_normal_target_profit_usdt": 0.05,
     "wave_tsunami_target_profit_usdt": 0.10,
     "wave_normal_leverage": 5,
