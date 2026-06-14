@@ -1,43 +1,33 @@
-# MEXC Micro Maker Bot v0063 — Virtual Harness Tested
+# MEXC Micro Maker Bot v0064 — Stable Panel Runtime
 
-Фокус версии: остановить слепые правки и проверять бот в локальной виртуальной среде перед выдачей.
+Главная цель v0064 — не добавлять новые торговые идеи, а стабилизировать Telegram/runtime:
 
-## Что изменено относительно v0062
+- live-панель в режиме RUNNING обновляется свежим сообщением снизу (`telegram_panel_refresh_mode=resend`), потому что Telegram edit не поднимает старое сообщение вниз;
+- `/log_full` по умолчанию сразу присылает текстовый FAST-log и не висит на отправке файла;
+- файл лога отправляется только явно: `/log_full file`;
+- кнопка Fees показывает cached zero-fee статус без тяжёлой полной API-перепроверки;
+- Start/Stop дают финальный ответ отдельным сообщением и не должны оставлять только “принято”;
+- Start не должен превращаться в Stop/Pause при первом нажатии;
+- первый scan tick после старта не блокируется повторным balance/positions private-check;
+- сохранены Mirror Lab virtual тесты и команды.
 
-- Версия и профиль обновлены до `v0063` / `wave_price_tsunami_v0063`.
-- В архив добавлены локальные smoke-тесты без Telegram и без MEXC:
-  - `tests/virtual_smoke_test.py`
-  - `tests/freeze_watchdog_test.py`
-- Тесты используют fake Telegram + fake MEXC market, гоняют:
-  - командные handlers: `/ping`, `/doctor`, `/log_tail`, `/log_full`, `/mirror_test start/report/stop`;
-  - engine start/stop;
-  - scan loop heartbeat;
-  - read-only `scan_now_text`;
-  - Mirror Lab collector/report;
-  - watchdog зависшего scan tick.
-- Основная логика v0062 freeze guard сохранена:
-  - run-loop tick timeout;
-  - throttled private balance/position checks;
-  - FAST `/log_full` без тяжёлых MEXC-запросов;
-  - direct command replies без live-panel зависимости.
-
-## Проверки, которые были прогнаны локально
+## Проверки, прогнанные локально
 
 ```bash
-python -m py_compile *.py
+python -m py_compile *.py tests/*.py
 python tests/virtual_smoke_test.py
 python tests/freeze_watchdog_test.py
+python tests/telegram_runtime_test.py
+python tests/callback_audit.py
 ```
 
 Ожидаемый результат:
 
 ```text
-VIRTUAL_SMOKE_TEST_OK v0063
-FREEZE_WATCHDOG_TEST_OK v0063
+VIRTUAL_SMOKE_TEST_OK v0064
+FREEZE_WATCHDOG_TEST_OK v0064
+TELEGRAM_RUNTIME_TEST_OK v0064
+CALLBACK_AUDIT_OK callbacks=86
 ```
 
-Также статически проверены callback-кнопки: все `set:`/`toggle:` ключи существуют в `DEFAULTS`, префиксы обработчиков известные.
-
-## Важно
-
-Живой MEXC/Telegram API из этой среды не запускался. Проверена локальная виртуальная среда: команды, файл логов, Mirror Lab, engine-loop, скан и watchdog зависаний.
+Живой MEXC/Telegram из среды сборки не запускался.
