@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 DEFAULTS: dict[str, Any] = {
-    "bot_version": "v0036",
+    "bot_version": "v0037",
 
     # secrets are set from Telegram with /api set KEY SECRET. Telegram token stays in ENV.
     "mexc_api_key": "",
@@ -16,7 +16,7 @@ DEFAULTS: dict[str, Any] = {
     # These values are built in and can be changed from Telegram with /set.
     "mexc_rest_base": "https://api.mexc.com",
     "mexc_recv_window": 20000,
-    "mexc_private_rate_limit": 8,
+    "mexc_private_rate_limit": 3,
     "mexc_public_timeout": 6.0,
     "mexc_private_timeout": 15.0,
     "mexc_strict_leverage": False,
@@ -105,7 +105,7 @@ DEFAULTS: dict[str, Any] = {
     "max_entry_maker_fee_rate": 0.0,
     "max_entry_taker_fee_rate": 0.0,
     "fee_guard_ignore_symbol": True,
-    "trade_profile": "wave_price_tsunami_v0036",
+    "trade_profile": "wave_price_tsunami_v0037",
     "edge_filter_enabled": False,
     "entry_top_imbalance_ratio": 1.15,
     "entry_microprice_min_ticks": 0.10,
@@ -173,8 +173,11 @@ DEFAULTS: dict[str, Any] = {
     "wave_fee_target_multiplier": 2.4,
     "wave_fee_profit_buffer_usdt": 0.05,
     "wave_parallel_open": True,
+    "wave_open_batch_gap_ms": 420,
+    "wave_open_retry_delay_sec": 1.25,
+    "wave_open_retry_rounds": 2,
 
-    # v0036 Price Tsunami mode: ignore old internal score for market direction.
+    # v0037 Price Tsunami mode: ignore old internal score for market direction.
     # Count how many active coins rose/fell over 10 seconds, then use 60-second
     # dominance acceleration to catch an early market wave.
     "wave_price_vote_enabled": True,
@@ -274,7 +277,7 @@ WAVE_HUNTER_PROFILE_V0032: dict[str, Any] = {
     "daily_loss_limit_usdt": 999.0,
     "switch_score_improvement_pct": 5.0,
     "min_symbol_hold_sec": 5.0,
-    "mexc_private_rate_limit": 8,
+    "mexc_private_rate_limit": 3,
     "mexc_strict_leverage": False,
     "mexc_set_leverage_on_entry": False,
     "real_pnl_enabled": True,
@@ -286,7 +289,7 @@ WAVE_HUNTER_PROFILE_V0032: dict[str, Any] = {
     "max_entry_maker_fee_rate": 0.0,
     "max_entry_taker_fee_rate": 0.0,
     "fee_guard_ignore_symbol": True,
-    "trade_profile": "wave_price_tsunami_v0036",
+    "trade_profile": "wave_price_tsunami_v0037",
     "edge_filter_enabled": False,
     "entry_top_imbalance_ratio": 1.15,
     "entry_microprice_min_ticks": 0.10,
@@ -351,8 +354,11 @@ WAVE_HUNTER_PROFILE_V0032: dict[str, Any] = {
     "wave_fee_target_multiplier": 2.4,
     "wave_fee_profit_buffer_usdt": 0.05,
     "wave_parallel_open": True,
+    "wave_open_batch_gap_ms": 420,
+    "wave_open_retry_delay_sec": 1.25,
+    "wave_open_retry_rounds": 2,
 
-    # v0036 Price Tsunami mode: ignore old internal score for market direction.
+    # v0037 Price Tsunami mode: ignore old internal score for market direction.
     # Count how many active coins rose/fell over 10 seconds, then use 60-second
     # dominance acceleration to catch an early market wave.
     "wave_price_vote_enabled": True,

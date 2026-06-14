@@ -1,6 +1,6 @@
-# MEXC Micro Maker LIVE v0036
+# MEXC Micro Maker LIVE v0037
 
-## v0036 Price Tsunami Fast UI + Stop Pause Fix
+## v0037 Price Tsunami Basket + Stop Pause Fix
 
 Strategy: price-vote market wave detector. The bot samples prices, counts how many active symbols rose/fell, calculates dominance and 60s acceleration, then opens a 5-position basket in one direction.
 
