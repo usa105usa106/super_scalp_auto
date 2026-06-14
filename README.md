@@ -1,19 +1,43 @@
-# MEXC Micro Maker Bot v0060 Mirror Result Fix
+# MEXC Micro Maker Bot v0063 — Virtual Harness Tested
 
-Исправления v0060:
-- `/mirror_test start/report/stop/clear` больше не отвечают только “Команда принята”;
-- команды Mirror Lab возвращают финальный результат отдельным reply-сообщением прямо в чат;
-- `/mirror_start`, `/mirror_report`, `/mirror_stop`, `/mirror_clear` работают как короткие алиасы;
-- в ответе `/mirror_test start` сразу видно, запущен ли collector;
-- `/mirror_test report` показывает состояние collector и отчёт/сколько снимков накоплено;
-- ошибки Mirror Lab теперь пишутся в чат как `Mirror START/REPORT error`, а не пропадают молча;
-- версия обновлена на v0060 / `wave_price_tsunami_v0060`.
+Фокус версии: остановить слепые правки и проверять бот в локальной виртуальной среде перед выдачей.
 
-Проверка:
-1. `/ping` → должен показать v0060.
-2. `/doctor` → должен показать v0060.
-3. `/mirror_test start` → должен сразу дать сообщение `Mirror Lab START v0060`.
-4. `/doctor` → в `ui_tasks` должен появиться `mirror_collect`.
-5. Через 1–3 минуты `/mirror_report` → должен дать отчёт.
+## Что изменено относительно v0062
 
-Mirror Lab не открывает реальные сделки. Он использует read-only Price Scan и считает virtual original vs mirror.
+- Версия и профиль обновлены до `v0063` / `wave_price_tsunami_v0063`.
+- В архив добавлены локальные smoke-тесты без Telegram и без MEXC:
+  - `tests/virtual_smoke_test.py`
+  - `tests/freeze_watchdog_test.py`
+- Тесты используют fake Telegram + fake MEXC market, гоняют:
+  - командные handlers: `/ping`, `/doctor`, `/log_tail`, `/log_full`, `/mirror_test start/report/stop`;
+  - engine start/stop;
+  - scan loop heartbeat;
+  - read-only `scan_now_text`;
+  - Mirror Lab collector/report;
+  - watchdog зависшего scan tick.
+- Основная логика v0062 freeze guard сохранена:
+  - run-loop tick timeout;
+  - throttled private balance/position checks;
+  - FAST `/log_full` без тяжёлых MEXC-запросов;
+  - direct command replies без live-panel зависимости.
+
+## Проверки, которые были прогнаны локально
+
+```bash
+python -m py_compile *.py
+python tests/virtual_smoke_test.py
+python tests/freeze_watchdog_test.py
+```
+
+Ожидаемый результат:
+
+```text
+VIRTUAL_SMOKE_TEST_OK v0063
+FREEZE_WATCHDOG_TEST_OK v0063
+```
+
+Также статически проверены callback-кнопки: все `set:`/`toggle:` ключи существуют в `DEFAULTS`, префиксы обработчиков известные.
+
+## Важно
+
+Живой MEXC/Telegram API из этой среды не запускался. Проверена локальная виртуальная среда: команды, файл логов, Mirror Lab, engine-loop, скан и watchdog зависаний.

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 DEFAULTS: dict[str, Any] = {
-    "bot_version": "v0060",
+    "bot_version": "v0063",
 
     # secrets are set from Telegram with /api set KEY SECRET. Telegram token stays in ENV.
     "mexc_api_key": "",
@@ -62,6 +62,10 @@ DEFAULTS: dict[str, Any] = {
     "allow_manual_fee_fallback": False,
     "max_zero_fee_scan_symbols": 0,
     "scan_interval_sec": 1.0,
+    # v0063 freeze guard: one bad MEXC/WS call must not freeze the whole run loop.
+    "run_loop_tick_timeout_sec": 22.0,
+    "risk_guard_balance_interval_sec": 12.0,
+    "existing_positions_check_interval_sec": 8.0,
     "zero_fee_rescan_sec": 60.0,
     # 0 = ALL: do not cap the zero-fee universe, active price scan, or WS subscriptions.
     "zero_fee_universe_max_symbols": 0,
@@ -105,7 +109,7 @@ DEFAULTS: dict[str, Any] = {
     "max_entry_maker_fee_rate": 0.0,
     "max_entry_taker_fee_rate": 0.0,
     "fee_guard_ignore_symbol": True,
-    "trade_profile": "wave_price_tsunami_v0060",
+    "trade_profile": "wave_price_tsunami_v0063",
     "edge_filter_enabled": False,
     "entry_top_imbalance_ratio": 1.15,
     "entry_microprice_min_ticks": 0.10,
@@ -162,7 +166,7 @@ DEFAULTS: dict[str, Any] = {
     "wave_close_mode": "market",
     "wave_entry_post_only": False,
     "wave_entry_order_lifetime_ms": 450,
-    # v0060: aggressive entry must not wait in queue. Pick an existing book
+    # v0063: aggressive entry must not wait in queue. Pick an existing book
     # level with enough cumulative liquidity, place a normal LIMIT there,
     # wait briefly, then cancel leftovers.
     "wave_entry_book_sweep_levels": 5,
@@ -186,11 +190,11 @@ DEFAULTS: dict[str, Any] = {
     "wave_fill_topup_rounds": 5,
     "wave_open_max_attempts_multiplier": 5.0,
 
-    # v0060 Price Tsunami mode: global 10s price vote, clean early/normal/tsunami rules.
+    # v0063 Price Tsunami mode: global 10s price vote, clean early/normal/tsunami rules.
     # Count how many ALL active zero-fee coins rose/fell over 10 seconds, then use 60-second
     # dominance growth to catch an early market wave.
     "wave_price_vote_enabled": True,
-    # v0060: market signal mode switch. all_zero_total keeps the current
+    # v0063: market signal mode switch. all_zero_total keeps the current
     # full zero-fee universe vote. top10_leaders uses the 10 most liquid
     # non-stable zero-fee USDT leaders for direction; trade entries still
     # use the full zero-fee universe. TOP10 rules: 7/10 NORMAL,
@@ -206,7 +210,7 @@ DEFAULTS: dict[str, Any] = {
     "wave_price_min_move_pct": 0.015,
     "wave_accel_lookback_sec": 60.0,
     "wave_accel_trigger_pct": 15.0,
-    # v0060: signal must HOLD, not just flash for one scan tick.
+    # v0063: signal must HOLD, not just flash for one scan tick.
     # Example: Early requires current side >=65% AND +15p.p. growth.
     # Stable entry requires 4 of last 5 hold samples over about 10 seconds.
     "wave_signal_hold_checks": 5,
@@ -221,7 +225,7 @@ DEFAULTS: dict[str, Any] = {
     "wave_pick_start_pct": 0.25,
     "wave_pick_end_pct": 0.60,
 
-    # v0060 Mirror Lab: virtual-only inverse strategy tester. It never sends
+    # v0063 Mirror Lab: virtual-only inverse strategy tester. It never sends
     # orders. It records recent scan snapshots and can quickly replay several
     # deliberately bad signal models against their mirror/reverse side.
     "mirror_lab_enabled": False,
@@ -328,7 +332,7 @@ WAVE_HUNTER_PROFILE_V0032: dict[str, Any] = {
     "max_entry_maker_fee_rate": 0.0,
     "max_entry_taker_fee_rate": 0.0,
     "fee_guard_ignore_symbol": True,
-    "trade_profile": "wave_price_tsunami_v0060",
+    "trade_profile": "wave_price_tsunami_v0063",
     "edge_filter_enabled": False,
     "entry_top_imbalance_ratio": 1.15,
     "entry_microprice_min_ticks": 0.10,
@@ -382,7 +386,7 @@ WAVE_HUNTER_PROFILE_V0032: dict[str, Any] = {
     "wave_close_mode": "market",
     "wave_entry_post_only": False,
     "wave_entry_order_lifetime_ms": 450,
-    # v0060: aggressive entry must not wait in queue. Pick an existing book
+    # v0063: aggressive entry must not wait in queue. Pick an existing book
     # level with enough cumulative liquidity, place a normal LIMIT there,
     # wait briefly, then cancel leftovers.
     "wave_entry_book_sweep_levels": 5,
@@ -406,11 +410,11 @@ WAVE_HUNTER_PROFILE_V0032: dict[str, Any] = {
     "wave_fill_topup_rounds": 5,
     "wave_open_max_attempts_multiplier": 5.0,
 
-    # v0060 Price Tsunami mode: global 10s price vote, clean early/normal/tsunami rules.
+    # v0063 Price Tsunami mode: global 10s price vote, clean early/normal/tsunami rules.
     # Count how many ALL active zero-fee coins rose/fell over 10 seconds, then use 60-second
     # dominance growth to catch an early market wave.
     "wave_price_vote_enabled": True,
-    # v0060: market signal mode switch. all_zero_total keeps the current
+    # v0063: market signal mode switch. all_zero_total keeps the current
     # full zero-fee universe vote. top10_leaders uses the 10 most liquid
     # non-stable zero-fee USDT leaders for direction; trade entries still
     # use the full zero-fee universe. TOP10 rules: 7/10 NORMAL,
@@ -426,7 +430,7 @@ WAVE_HUNTER_PROFILE_V0032: dict[str, Any] = {
     "wave_price_min_move_pct": 0.015,
     "wave_accel_lookback_sec": 60.0,
     "wave_accel_trigger_pct": 15.0,
-    # v0060: signal must HOLD, not just flash for one scan tick.
+    # v0063: signal must HOLD, not just flash for one scan tick.
     # Example: Early requires current side >=65% AND +15p.p. growth.
     # Stable entry requires 4 of last 5 hold samples over about 10 seconds.
     "wave_signal_hold_checks": 5,
