@@ -1,38 +1,19 @@
-# MEXC Micro Maker Bot — v0059 Command Direct Fix
+# MEXC Micro Maker Bot v0060 Mirror Result Fix
 
-Цель v0059: убрать баг, когда команды в Telegram выглядят как будто пропали/не отвечают, а бот вместо результата пишет только `Меню команд включено`.
+Исправления v0060:
+- `/mirror_test start/report/stop/clear` больше не отвечают только “Команда принята”;
+- команды Mirror Lab возвращают финальный результат отдельным reply-сообщением прямо в чат;
+- `/mirror_start`, `/mirror_report`, `/mirror_stop`, `/mirror_clear` работают как короткие алиасы;
+- в ответе `/mirror_test start` сразу видно, запущен ли collector;
+- `/mirror_test report` показывает состояние collector и отчёт/сколько снимков накоплено;
+- ошибки Mirror Lab теперь пишутся в чат как `Mirror START/REPORT error`, а не пропадают молча;
+- версия обновлена на v0060 / `wave_price_tsunami_v0060`.
 
-## Что изменено
+Проверка:
+1. `/ping` → должен показать v0060.
+2. `/doctor` → должен показать v0060.
+3. `/mirror_test start` → должен сразу дать сообщение `Mirror Lab START v0060`.
+4. `/doctor` → в `ui_tasks` должен появиться `mirror_collect`.
+5. Через 1–3 минуты `/mirror_report` → должен дать отчёт.
 
-- `bot_version = v0059`
-- `trade_profile = wave_price_tsunami_v0059`
-- Команды больше не удаляются принудительно:
-  - `telegram_delete_command_messages = false`
-- Reply-keyboard helper отключён по умолчанию:
-  - `telegram_reply_keyboard = false`
-  - `telegram_reply_keyboard_delete_hint = false`
-- `/log_full` теперь полностью direct:
-  - сразу отвечает `команда принята`
-  - не использует live-панель
-  - не показывает helper menu
-  - отправляет файл отдельным сообщением
-  - при ошибке/timeout пишет ошибку в чат
-- `/mirror_test start/report/stop/clear` теперь direct:
-  - сначала ack-сообщение
-  - потом результат отдельным сообщением
-  - не зависит от live-панели
-- `/ping`, `/status`, `/trades`, `/help`, `/scan` отвечают отдельным сообщением, а не через старую панель.
-- Добавлен `/scan` как прямой read-only Price Scan.
-- Добавлен global error handler: если команда падает, бот пишет ошибку в чат и в full log, а не молчит.
-- Mirror Lab button теперь также отправляет report отдельным сообщением.
-
-## Проверка после запуска
-
-1. `/ping` — должен сразу ответить отдельным сообщением с `v0059`.
-2. `/doctor` — должен показать `Doctor v0059`.
-3. `/log_full` — сначала ack, потом файл.
-4. `/mirror_test start` — ack + сообщение о запуске collector.
-5. Через 1–3 минуты: `/mirror_test report`.
-6. `/scan` — read-only scan отдельным сообщением.
-
-Живой запуск на MEXC/Telegram не выполнялся в этой среде. Статическая проверка и `py_compile` пройдены.
+Mirror Lab не открывает реальные сделки. Он использует read-only Price Scan и считает virtual original vs mirror.

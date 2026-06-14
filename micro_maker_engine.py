@@ -75,7 +75,7 @@ class MicroMakerEngine:
         self.mid_history: dict[str, list[tuple[float, float, float]]] = {}
         self.wave_candidate_side: str | None = None
         self.wave_candidate_count: int = 0
-        # v0059: market signal hold/stability guard. A one-tick acceleration spike
+        # v0060: market signal hold/stability guard. A one-tick acceleration spike
         # must not fire a basket. The signal is sampled over a time window,
         # so one noisy failed check does not fully reset a valid wave.
         self.wave_signal_hold_key: str | None = None
@@ -88,12 +88,12 @@ class MicroMakerEngine:
         self.wave_signal_mode_last: str = "all_zero_total"
         self.last_wave_vote_rows: list[dict[str, Any]] = []
         self.last_wave_vote_summary: dict[str, Any] = {}
-        # v0059: optional TOP10 leader signal mode. Leaders decide only market
+        # v0060: optional TOP10 leader signal mode. Leaders decide only market
         # direction; entries are still picked from the full zero-fee universe.
         self.last_wave_leader_symbols: list[str] = []
         self.last_wave_leader_vote_rows: list[dict[str, Any]] = []
         self.last_wave_leader_vote_summary: dict[str, Any] = {}
-        # v0059 Mirror Lab: virtual-only replay buffer. No real orders are sent.
+        # v0060 Mirror Lab: virtual-only replay buffer. No real orders are sent.
         self.mirror_lab_snapshots: list[dict[str, Any]] = []
         self.mirror_lab_last_report: dict[str, Any] = {}
         self.mirror_lab_log_path = Path("logs/mirror_lab_events.jsonl")
@@ -223,7 +223,7 @@ class MicroMakerEngine:
         # indexes and tokenized tickers without this substring remain allowed.
         if "STOCK" in sym:
             return True
-        # v0059: the account balance/margin shown by MEXC is USDT. Contracts like
+        # v0060: the account balance/margin shown by MEXC is USDT. Contracts like
         # SOL_USDC/BTC_USDC require USDC collateral, so MEXC returns
         # "Balance insufficient" with available=0 even when USDT is free.
         # Basket mode must therefore trade only *_USDT contracts by default.
@@ -645,7 +645,7 @@ class MicroMakerEngine:
     async def _ensure_market_ws(self, symbols: list[str], s: dict[str, Any]) -> None:
         """Start/refresh WS subscriptions for fast depth scanning.
 
-        v0059 rule: 0 means ALL. The price vote must be based on the real
+        v0060 rule: 0 means ALL. The price vote must be based on the real
         active zero-fee universe count, not on an arbitrary 250-symbol cap.
         """
         if str(s.get("market_data_mode") or "websocket").lower() != "websocket" or not bool(s.get("ws_depth_enabled")):
@@ -773,7 +773,7 @@ class MicroMakerEngine:
             self._log_error("start_balance_error", e)
         self.task = asyncio.create_task(self._run_loop(), name="micro_maker_loop")
         self._log_event("start_success", start_equity=self.stats.start_equity)
-        return "▶️ Price Tsunami v0059 запущен. Схема: price-scan 10s по активным zero-fee монетам → LONG/SHORT/NEUTRAL проценты → 5 сделок одной стороной → закрытие всей корзины по REAL NET PnL."
+        return "▶️ Price Tsunami v0060 запущен. Схема: price-scan 10s по активным zero-fee монетам → LONG/SHORT/NEUTRAL проценты → 5 сделок одной стороной → закрытие всей корзины по REAL NET PnL."
 
     async def stop(self, close_positions: bool = False) -> str:
         self._log_event("stop_requested", close_positions=close_positions, active_tasks=list(self.active_tasks.keys()))
@@ -1010,7 +1010,7 @@ class MicroMakerEngine:
     def quick_status_text(self) -> str:
         """Clean live panel for Price Tsunami mode. No REST calls here.
 
-        v0059 UI rule: market scan blocks are ALWAYS visible, even when the
+        v0060 UI rule: market scan blocks are ALWAYS visible, even when the
         basket is already open. Debug/runtime details are kept out of the main
         panel so the Telegram message stays readable.
         """
@@ -1123,7 +1123,7 @@ class MicroMakerEngine:
             error_block = f"\n\nОШИБКА\n{friendly_error}"
 
         lines = [
-            f"🌊 Price Tsunami {s.get('bot_version', 'v0059')}",
+            f"🌊 Price Tsunami {s.get('bot_version', 'v0060')}",
             f"{state} • {last_update} • up {h:02d}:{m:02d}:{sec:02d}{cooldown_txt}",
             "",
             "РЫНОК",
@@ -1183,7 +1183,7 @@ class MicroMakerEngine:
             await self._ensure_client()
             rows = await self._refresh_market_scan(s, force=True)
             # Build the same decision text the live loop uses, but do not open trades here.
-            # v0059: scan_now must be read-only for signal/hold state; pressing the
+            # v0060: scan_now must be read-only for signal/hold state; pressing the
             # Price Scan button must not help satisfy HOLD checks or reset live state.
             saved_signal_state = (
                 list(self.wave_dominance_history),
@@ -1264,7 +1264,7 @@ class MicroMakerEngine:
             hold_checks = int(s.get('wave_signal_hold_checks') or 5)
             hold_sec = float(s.get('wave_signal_hold_sec') or 10.0)
             return (
-                f"🔍 Price Scan {s.get('bot_version', 'v0059')}\n"
+                f"🔍 Price Scan {s.get('bot_version', 'v0060')}\n"
                 f"{state} • {self._local_time_text(s)} • up {hh:02d}:{mm:02d}:{ss:02d}\n\n"
                 "РЫНОК\n"
                 f"Signal: {'TOP10 leaders' if v.get('signal_mode') == 'top10_leaders' else 'ALL zero total'}\n"
@@ -1313,7 +1313,7 @@ class MicroMakerEngine:
 
     async def _run_loop(self) -> None:
         self._log_event("run_loop_started")
-        await self._notify("✅ Price Tsunami v0059 started: ALL mode 65/75% +15п.п.; TOP10 mode 7/10 normal, 7/10 +2 early, 8/10 tsunami; HOLD 4/5 за ~10s; entries from full zero-fee universe.")
+        await self._notify("✅ Price Tsunami v0060 started: ALL mode 65/75% +15п.п.; TOP10 mode 7/10 normal, 7/10 +2 early, 8/10 tsunami; HOLD 4/5 за ~10s; entries from full zero-fee universe.")
         while self.running:
             try:
                 s = self._settings()
@@ -1398,7 +1398,7 @@ class MicroMakerEngine:
         ignored = self._ignored_symbols(s)
 
         def apply_scan_cap(pool: list[str]) -> list[str]:
-            # v0059: max_zero_fee_scan_symbols <= 0 means ALL symbols, no 250 cap.
+            # v0060: max_zero_fee_scan_symbols <= 0 means ALL symbols, no 250 cap.
             limit = int(s.get("max_zero_fee_scan_symbols") or 0)
             return pool[:limit] if limit > 0 else pool
 
@@ -1587,7 +1587,7 @@ class MicroMakerEngine:
                     add_scan_detail(sym, "reject", "depth", bid=bid, ask=ask, spread_ticks=spread_ticks, depth_bid=depth_b, depth_ask=depth_a, depth_min=depth_min, required_depth=required_depth, source=book.get("source"))
                     continue
                 imbalance = max(depth_b / max(depth_a, 1e-9), depth_a / max(depth_b, 1e-9))
-                # v0059: Price Tsunami no longer uses the old order-book
+                # v0060: Price Tsunami no longer uses the old order-book
                 # imbalance/edge direction filter to decide whether a coin is a
                 # candidate. Direction is price-vote only: price rose over 10s =>
                 # LONG, price fell => SHORT. Order book checks remain only as
@@ -1624,7 +1624,7 @@ class MicroMakerEngine:
                     em, top_score, micro_score = {}, 0.0, 0.0
                 move_ticks, move_age = self._recent_move_ticks(sym, float(s.get("wave_lookback_sec") or s.get("basket_rebound_lookback_sec") or 20.0), tick)
                 move_pct, move_pct_age = vote_move_pct, vote_age
-                # v0059: score is no longer the market-direction source. Keep it only
+                # v0060: score is no longer the market-direction source. Keep it only
                 # as secondary display/ranking; the wave detector uses move_pct votes.
                 wave_score = min(abs(float(move_pct or 0.0)) * 120.0, 30.0) if bool(s.get("wave_basket_enabled", False)) else 0.0
                 score = depth_score + spread_score + imbalance_score + volume_score + top_score + micro_score + wave_score
@@ -1632,7 +1632,7 @@ class MicroMakerEngine:
                     "symbol": sym,
                     "score": score,
                     "vote": vote,
-                    # v0059: in Price Tsunami the trade side comes from the 10s
+                    # v0060: in Price Tsunami the trade side comes from the 10s
                     # price vote, not from the old order-book edge/imbalance bias.
                     "bias": bias,
                     "spread_ticks": spread_ticks,
@@ -1671,7 +1671,7 @@ class MicroMakerEngine:
             scored = [r for r in scored if float(r.get("score") or 0) >= min_score]
             if before_count > len(scored):
                 reject_counts["score"] = reject_counts.get("score", 0) + (before_count - len(scored))
-        # v0059: denominator must be the whole selected universe. If a symbol has
+        # v0060: denominator must be the whole selected universe. If a symbol has
         # no fresh WS book / no 10s price history / scan error, count it as NEUTRAL
         # instead of silently shrinking 377 coins into e.g. 352 votes.
         voted_symbols = {MexcFuturesClient.contract_id(r.get("symbol")) for r in wave_vote_rows if r.get("symbol")}
@@ -1689,7 +1689,7 @@ class MicroMakerEngine:
         vote_summary = self._summarize_wave_votes(wave_vote_rows)
         self.last_wave_vote_rows = wave_vote_rows
         self.last_wave_vote_summary = vote_summary
-        # v0059: precompute TOP10 leaders from the same full zero-fee pool.
+        # v0060: precompute TOP10 leaders from the same full zero-fee pool.
         # This does not reduce the trade universe; it only gives an optional
         # market-direction signal source.
         leader_symbols = self._top_liquid_leader_symbols(pool, s)
@@ -1718,7 +1718,7 @@ class MicroMakerEngine:
             self.stats.last_action = f"scan: valid books below min_score={min_score:g} ({self._format_reject_counts()})"
         else:
             self.stats.last_action = f"scan: no symbol passed filters ({self._format_reject_counts()})"
-        # v0059 Mirror Lab records only compact virtual snapshots. It does not
+        # v0060 Mirror Lab records only compact virtual snapshots. It does not
         # affect signal/hold state and never sends orders.
         self._record_mirror_snapshot(all_valid_scored, s)
         self._log_event("scan_summary", force=force, pool_count=len(pool), active_vote_count=vote_summary.get("active", 0), vote_summary=vote_summary, leader_symbols=leader_symbols, leader_vote_summary=leader_vote_summary, valid_count=len(scored), raw_valid_count=len(all_valid_scored), min_trade_score=min_score, reject_counts=reject_counts, top=scored[:10], raw_top=all_valid_scored[:10], details_logged=len(scan_details), details=scan_details)
@@ -1823,7 +1823,7 @@ class MicroMakerEngine:
     def _recent_move_pct(self, symbol: str, lookback_sec: float) -> tuple[float | None, float]:
         """Return mid-price percent move over lookback window, plus sample age.
 
-        v0059 Wave Price Tsunami Basket deliberately uses this simple fact instead of
+        v0060 Wave Price Tsunami Basket deliberately uses this simple fact instead of
         internal score: price now versus price N seconds ago.
         """
         sid = MexcFuturesClient.contract_id(symbol)
@@ -1956,7 +1956,7 @@ class MicroMakerEngine:
         else:
             forced = None
 
-        # v0059 Wave Price Tsunami Basket: market direction is not taken from the old
+        # v0060 Wave Price Tsunami Basket: market direction is not taken from the old
         # book score. A coin votes LONG when its mid-price rose over the price
         # lookback, SHORT when it fell. This makes the wave detector transparent:
         # count rose/fell coins every ~10 seconds, then fire the basket.
@@ -2085,7 +2085,7 @@ class MicroMakerEngine:
                     break
         return picked
 
-    # ------------------------- Mirror Lab v0059 -------------------------
+    # ------------------------- Mirror Lab v0060 -------------------------
     def clear_mirror_lab(self) -> str:
         """Clear the virtual-only mirror lab buffer and last report."""
         self.mirror_lab_snapshots = []
@@ -2256,7 +2256,7 @@ class MicroMakerEngine:
         fee_bps = max(0.0, float(s.get("mirror_lab_virtual_fee_bps") or 0.0))
         if len(snaps) < min_snaps:
             return (
-                f"🪞 Mirror Lab {s.get('bot_version', 'v0059')}\n"
+                f"🪞 Mirror Lab {s.get('bot_version', 'v0060')}\n"
                 f"Mode: {'ON' if enabled else 'OFF'}\n\n"
                 f"Нужно накопить снимки: {len(snaps)}/{min_snaps}.\n"
                 f"Команда: /mirror_test start — включить сбор виртуальных снимков.\n"
@@ -2312,7 +2312,7 @@ class MicroMakerEngine:
         except Exception:
             pass
         lines = [
-            f"🪞 Mirror Lab {s.get('bot_version', 'v0059')}",
+            f"🪞 Mirror Lab {s.get('bot_version', 'v0060')}",
             f"Mode: {'ON' if enabled else 'OFF'} | snapshots {len(snaps)} | horizon {horizon:.0f}s",
             f"Virtual size: {notional:.2f} USDT/slot | fee {fee_bps:.2f} bps",
             "",
@@ -2345,7 +2345,7 @@ class MicroMakerEngine:
         return "\n".join(lines)[:3900]
 
     def _detect_wave_signal(self, rows: list[dict[str, Any]], s: dict[str, Any]) -> tuple[str | None, list[dict[str, Any]], dict[str, Any]]:
-        """Detect v0059 Price Tsunami from the selected market signal source.
+        """Detect v0060 Price Tsunami from the selected market signal source.
 
         ALL mode:
         - Normal Wave: dominance >= 75%.
@@ -2446,7 +2446,7 @@ class MicroMakerEngine:
             normal_count_need = max(1, int(s.get("wave_top10_normal_count") or 7))
             tsunami_count_need = max(normal_count_need, int(s.get("wave_top10_tsunami_count") or 8))
             accel_count_need = max(0, int(s.get("wave_top10_accel_count") or 2))
-            # v0059: TOP10 is mapped to the ALL-zero logic:
+            # v0060: TOP10 is mapped to the ALL-zero logic:
             # - 7/10 current direction = NORMAL, same as broad dominance.
             # - 7/10 + growth of +2 leaders over 60s = EARLY, same as +15p.p. acceleration.
             # - 8/10 current direction = TSUNAMI, because this is a very strong leader consensus.
@@ -2473,7 +2473,7 @@ class MicroMakerEngine:
 
         vote_summary = signal_summary
 
-        # v0059 HOLD rule: +15p.p. must be stable, not a one-scan spike.
+        # v0060 HOLD rule: +15p.p. must be stable, not a one-scan spike.
         # Default rule: 4 of the last 5 sampled checks over about 10 seconds.
         # This is stronger than the old 3/3s hold and tolerant to one noisy failed check.
         hold_checks = max(1, int(s.get("wave_signal_hold_checks") or 5))
@@ -2752,7 +2752,7 @@ class MicroMakerEngine:
             self._remember_wave_open_skip(symbol, "no_margin", margin_note=margin_note)
             self._log_event("wave_open_no_margin", symbol=symbol, margin_note=margin_note)
             return None
-        # v0059: aggressive entry means: choose a price that already exists in
+        # v0060: aggressive entry means: choose a price that already exists in
         # the opposite side of the book and has enough cumulative liquidity for
         # this slot. We do NOT place a passive maker order and wait in queue.
         # LONG consumes asks; SHORT consumes bids. If the best level is enough,
@@ -2956,7 +2956,7 @@ class MicroMakerEngine:
         self._log_event("wave_cycle_start", side=side, symbols=symbols, target=target, leverage=s.get("leverage"), signal=signal, equity_before=equity_before)
         wave_slots = int(s.get("wave_positions") or 5)
         order_symbols = symbols[:wave_slots]
-        # v0059: the first 5 picks can become stale while the controlled burst is
+        # v0060: the first 5 picks can become stale while the controlled burst is
         # opening. If a slot is skipped because the coin flipped side, spread widened,
         # or the order did not fill, immediately top up from a fresh same-side scan
         # instead of accepting a 2/5 basket. MEXC throttle/rate-limit errors
@@ -3054,7 +3054,7 @@ class MicroMakerEngine:
             self.stats.last_action = f"PARTIAL {side.upper()} basket: opened {len(opened)}/{wave_slots}; replaced stale slots but still not full"
             self._log_event("wave_cycle_partial", filled=len(opened), target_slots=wave_slots, symbols=[p.get("symbol") for p in opened], skipped=skipped[-12:], attempts=open_attempts)
 
-        # v0059: if MEXC charged real fees despite the zero-fee universe, do not
+        # v0060: if MEXC charged real fees despite the zero-fee universe, do not
         # instantly kill the position. Instead raise the basket NET target so the
         # cycle only closes after fees + a real profit buffer are covered.
         entry_fee_sum = sum(self._position_fee_usdt(p) for p in opened)
@@ -3318,7 +3318,7 @@ class MicroMakerEngine:
         await self._manage_position(symbol, direction, pos, s, equity_before=equity_before)
 
     async def _manage_basket_position(self, symbol: str, direction: str, pos: dict[str, Any], s: dict[str, Any], equity_before: float | None = None) -> None:
-        """v0059 Wave Price Tsunami Basket manager.
+        """v0060 Wave Price Tsunami Basket manager.
 
         No per-position stop. A position is closed only with a maker close order
         when the configured positive basket target is reachable. After the task
@@ -3390,7 +3390,7 @@ class MicroMakerEngine:
             active_target_ticks = max(1, int(math.ceil(active_target_usdt / max(tick_value, 1e-12))))
             target_price = entry + active_target_ticks * tick if direction == "long" else entry - active_target_ticks * tick
 
-            # v0059 rotation: after the stale timeout, stop waiting for +$0.01.
+            # v0060 rotation: after the stale timeout, stop waiting for +$0.01.
             # The close order is downgraded to breakeven/small-profit so the slot can
             # rotate into a better coin. This is not a stop; it does not cross a loss.
             if direction == "long":
