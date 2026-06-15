@@ -3,11 +3,6 @@ from __future__ import annotations
 import asyncio
 import os
 import time
-import json
-try:
-    import fcntl
-except Exception:  # Windows/limited platforms
-    fcntl = None
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any
@@ -28,21 +23,15 @@ STORE = ConfigStore()
 ENGINE: MicroMakerEngine | None = None
 PANEL_LOCK = asyncio.Lock()
 PANEL_UPDATE_TASK: asyncio.Task | None = None
+RUNTIME_WATCHDOG_TASK: asyncio.Task | None = None
 PROCESS_START_TS = time.time()
 UI_BG_TASKS: dict[str, asyncio.Task] = {}
-TELEGRAM_IO_TIMEOUT_SEC = float(os.getenv("TELEGRAM_IO_TIMEOUT_SEC", "12"))
-BOT_INSTANCE_ID = f"{os.getpid()}-{int(PROCESS_START_TS)}"
-
-
-async def tg_wait(awaitable, timeout: float | None = None):
-    """Bound every Telegram network call so one bad edit/send cannot freeze UI locks."""
-    return await asyncio.wait_for(awaitable, timeout=max(3.0, float(timeout or TELEGRAM_IO_TIMEOUT_SEC)))
 
 
 def spawn_ui_task(coro, name: str = "ui_bg") -> asyncio.Task:
     """Run slow Telegram/API actions outside the callback handler so buttons do not stick.
 
-    v0064: one background UI task per action name. Repeated button taps must not
+    v0069: one background UI task per action name. Repeated button taps must not
     stack duplicate scans/fee checks/close-all operations in the background.
     If the same action is already running, keep it and close the unused coroutine.
     """
@@ -120,25 +109,7 @@ def admin_guard(handler):
         if not is_admin_update(update):
             await reject_non_admin(update)
             return
-        try:
-            await handler(update, context)
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            # v0064: command handlers must never fail silently.
-            try:
-                log_error("telegram_handler_error", e, handler=getattr(handler, "__name__", "unknown"), chat_id=getattr(update.effective_chat, "id", None))
-            except Exception:
-                pass
-            try:
-                chat_id = update.effective_chat.id if update.effective_chat else None
-                if chat_id:
-                    await tg_wait(context.bot.send_message(
-                        chat_id=chat_id,
-                        text=f"❌ Ошибка команды {getattr(handler, '__name__', 'handler')}: {str(e)[:900]}",
-                    ), timeout=8.0)
-            except Exception:
-                pass
+        await handler(update, context)
     return wrapped
 
 
@@ -153,7 +124,6 @@ def main_menu() -> InlineKeyboardMarkup:
         [b("📊 Panel", "menu:main"), b("🔍 Price Scan", "mm:scan")],
         [b("⚙️ Settings", "menu:settings"), b("📈 Symbols", "menu:symbols")],
         [b("🔑 API", "menu:api"), b("🧾 Fees", "mm:fees")],
-        [b("🪞 Mirror Lab", "mm:mirror")],
     ])
 
 
@@ -161,7 +131,7 @@ def main_menu() -> InlineKeyboardMarkup:
 def command_keyboard() -> ReplyKeyboardMarkup:
     """Ordinary Telegram reply keyboard, separate from inline panel buttons."""
     return ReplyKeyboardMarkup(
-        [["/start", "/ping"], ["/balance", "/status"], ["/trades", "/log_full"], ["/mirror_test report", "/mirror_test start"], ["/help"]],
+        [["/start", "/ping"], ["/balance", "/status"], ["/trades", "/log_full"], ["/help"]],
         resize_keyboard=True,
         is_persistent=True,
         input_field_placeholder="Команды бота",
@@ -179,20 +149,23 @@ async def delete_later(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message
 
 
 async def install_command_keyboard(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
-    """v0064: disabled by default. Native Telegram commands are enough.
+    """Shows ordinary command buttons without replacing the inline live panel.
 
-    The previous helper message made commands look broken: /log_full first sent
-    "menu enabled" and then, if another step failed, the user saw no real answer.
+    Telegram does not allow inline keyboard and reply keyboard on the same message,
+    so we send a tiny helper message with ReplyKeyboardMarkup. By default it is
+    deleted after a moment; the bot command menu is also registered in post_init.
     """
     s = STORE.load()
     if not bool(s.get("telegram_reply_keyboard")):
         return
     try:
-        await context.bot.send_message(
+        msg = await context.bot.send_message(
             chat_id=chat_id,
-            text="⌨️ Командное меню включено. Если мешает: /set telegram_reply_keyboard false",
+            text="⌨️ Меню команд включено: /start /ping /balance /status /trades /log_full /help",
             reply_markup=command_keyboard(),
         )
+        if bool(s.get("telegram_reply_keyboard_delete_hint")):
+            asyncio.create_task(delete_later(context, chat_id, msg.message_id, delay=1.5))
     except TelegramError:
         pass
 
@@ -256,7 +229,7 @@ def ping_text(update: Update | None = None, started_perf: float | None = None) -
 def settings_text() -> str:
     s = STORE.load()
     return (
-        f"⚙️ Price Tsunami Settings ({s.get('bot_version', 'v0064')})\n\n"
+        f"⚙️ Price Tsunami Settings ({s.get('bot_version', 'v0069')})\n\n"
         f"Signal mode: {s.get('wave_market_signal_mode', 'all_zero_total')}\n"
         f"all_zero_total: рынок считает весь zero-fee trade universe.\n"
         f"top10_leaders: рынок считают TOP10 ликвидных non-stable zero-fee, входы всё равно из полного zero-fee universe.\n"
@@ -273,7 +246,6 @@ def settings_text() -> str:
         f"Open retry: 5 сделок открываются с паузой {float(s.get('wave_open_batch_gap_ms') or 0)/1000:.1f}s; при MEXC rate-limit бот ждёт {float(s.get('wave_open_retry_delay_sec') or 0):.1f}s и повторяет до {s.get('wave_open_retry_rounds')} раз, потом добирает replacement.\n"
         f"After 10m: close only zero/microplus; if minus, wait recovery.\n"
         f"Stop: pause only. Close All: cancel orders + close positions.\n\n"
-        "Mirror Lab: /mirror_test start|report|stop|clear — виртуальный original vs mirror тест без реальных ордеров.\n"
         "Команды: /set size 20, /set candidates 0, /set ws_symbols 0, /set panel_sec 5, /symbols clear"
     )
 
@@ -296,7 +268,7 @@ def settings_menu() -> InlineKeyboardMarkup:
         [b("Panel 2s", "set:telegram_live_update_sec:2"), b("Panel 5s", "set:telegram_live_update_sec:5"), b("Panel 10s", "set:telegram_live_update_sec:10"), b("Stopped OFF", "set:telegram_live_stopped_update_sec:0")],
         [b("Dir BOTH", "set:direction_mode:both"), b("LONG", "set:direction_mode:long"), b("SHORT", "set:direction_mode:short")],
         [b("Emergency ON/OFF", "toggle:emergency_market_close"), b("Post-close ON/OFF", "toggle:post_only_close")],
-        [b("🌊 Price Tsunami Basket v0064", "preset:plus"), b("Custom mode", "preset:custom")],
+        [b("🌊 Price Tsunami Basket v0069", "preset:plus"), b("Custom mode", "preset:custom")],
         [b("⬅️ Back to Live", "menu:main")],
     ])
 
@@ -304,7 +276,7 @@ def settings_menu() -> InlineKeyboardMarkup:
 def symbols_text(engine: MicroMakerEngine | None = None) -> str:
     """Clean Symbols screen.
 
-    v0064: show what matters first: raw zero-fee count, blocked count,
+    v0069: show what matters first: raw zero-fee count, blocked count,
     ignored count, trade universe, and current scan readiness. Long explanatory
     text is removed from the main Telegram card.
     """
@@ -350,7 +322,7 @@ def symbols_text(engine: MicroMakerEngine | None = None) -> str:
     if str(s.get('wave_market_signal_mode') or 'all_zero_total') == 'top10_leaders':
         leaders_line = "TOP10 leaders: " + (", ".join(leader_symbols[:10]) if leader_symbols else "будут выбраны после scan") + "\n"
     return (
-        f"📈 Symbols / Universe {s.get('bot_version', 'v0064')}\n\n"
+        f"📈 Symbols / Universe {s.get('bot_version', 'v0069')}\n\n"
         "РЕЖИМ\n"
         f"Auto-select: {'ON' if s.get('auto_select_symbols') else 'OFF'}\n"
         f"Signal: {s.get('wave_market_signal_mode', 'all_zero_total')}\n"
@@ -482,7 +454,7 @@ def panel_text(engine: MicroMakerEngine | None = None) -> str:
         return e.quick_status_text()
     s = STORE.load()
     return (
-        f"🌊 Price Tsunami {s.get('bot_version', 'v0064')}\n"
+        f"🌊 Price Tsunami {s.get('bot_version', 'v0069')}\n"
         "State: STOPPED\n\n"
         "PRICE SCAN 10s: пока нет данных.\n"
         "LONG 0% | SHORT 0% | NEUTRAL 0%\n"
@@ -492,7 +464,7 @@ def panel_text(engine: MicroMakerEngine | None = None) -> str:
         "Normal: сейчас >=75% стороны → 5 сделок, 5x, NET +$0.05\n"
         "Tsunami: сейчас >=75% и эта же сторона выросла на +15п.п. за 60s → 5 сделок, 10x, NET +$0.10\n"
         "65/75 — итог сейчас; +15п.п. уже внутри этих процентов.\n"
-        "v0064: сигнал должен держаться 4 из 5 checks за ~10s; один шумовой провал не сбрасывает сигнал.\n\n"
+        "v0069: сигнал должен держаться 4 из 5 checks за ~10s; один шумовой провал не сбрасывает сигнал.\n\n"
         "Stop = пауза, позиции/ордера не трогает. Close All = снести всё.\n"
         "Нажми ▶️ Start Tsunami."
     )
@@ -523,25 +495,75 @@ async def safe_delete_message(context: ContextTypes.DEFAULT_TYPE, update: Update
     return False
 
 
-async def set_panel_identity(chat_id: int, message_id: int, mode: str = "main") -> None:
-    STORE.update({
+async def _panel_id_list() -> list[int]:
+    s = STORE.load()
+    raw = s.get("telegram_panel_message_ids") or []
+    out: list[int] = []
+    if isinstance(raw, list):
+        for x in raw:
+            try:
+                v = int(x)
+                if v and v not in out:
+                    out.append(v)
+            except Exception:
+                pass
+    cur = int(s.get("telegram_panel_message_id") or 0)
+    if cur and cur not in out:
+        out.append(cur)
+    return out[-30:]
+
+
+async def set_panel_identity(chat_id: int, message_id: int, mode: str = "main", *, fresh: bool = False) -> None:
+    ids = await _panel_id_list()
+    mid = int(message_id)
+    if mid and mid not in ids:
+        ids.append(mid)
+    update = {
         "telegram_panel_chat_id": int(chat_id),
-        "telegram_panel_message_id": int(message_id),
+        "telegram_panel_message_id": mid,
         "telegram_panel_mode": mode,
+        "telegram_panel_message_ids": ids[-30:],
+    }
+    if fresh or not float(STORE.load().get("telegram_panel_created_ts") or 0.0):
+        update["telegram_panel_created_ts"] = time.time()
+    STORE.update(update)
+
+
+async def delete_all_panels(app: Application) -> None:
+    s = STORE.load()
+    chat_id = int(s.get("telegram_panel_chat_id") or 0)
+    ids = await _panel_id_list()
+    if chat_id:
+        for mid in ids:
+            try:
+                await app.bot.delete_message(chat_id=chat_id, message_id=int(mid))
+            except TelegramError:
+                pass
+            except Exception:
+                pass
+    STORE.update({
+        "telegram_panel_message_id": 0,
+        "telegram_panel_chat_id": chat_id,
+        "telegram_panel_message_ids": [],
+        "telegram_panel_created_ts": 0.0,
     })
 
 
 async def delete_stored_panel(app: Application) -> None:
-    s = STORE.load()
-    chat_id = int(s.get("telegram_panel_chat_id") or 0)
-    message_id = int(s.get("telegram_panel_message_id") or 0)
-    if not chat_id or not message_id:
-        return
-    try:
-        await app.bot.delete_message(chat_id=chat_id, message_id=message_id)
-    except TelegramError:
-        pass
-    STORE.update({"telegram_panel_message_id": 0, "telegram_panel_chat_id": 0})
+    await delete_all_panels(app)
+
+
+async def send_fresh_panel(
+    context_or_app,
+    chat_id: int,
+    text: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+    mode: str = "main",
+) -> int:
+    bot = context_or_app.bot if hasattr(context_or_app, "bot") else context_or_app.application.bot
+    msg = await bot.send_message(chat_id=chat_id, text=text[:3900], reply_markup=reply_markup)
+    await set_panel_identity(chat_id, msg.message_id, mode, fresh=True)
+    return int(msg.message_id)
 
 
 async def upsert_panel(
@@ -556,44 +578,40 @@ async def upsert_panel(
         s = STORE.load()
         old_chat_id = int(s.get("telegram_panel_chat_id") or 0)
         old_message_id = int(s.get("telegram_panel_message_id") or 0)
-        if recreate and old_chat_id and old_message_id:
-            try:
-                await tg_wait(context.bot.delete_message(chat_id=old_chat_id, message_id=old_message_id))
-            except TelegramError:
-                pass
-            old_message_id = 0
+        if recreate:
+            await send_fresh_panel(context, chat_id, text, reply_markup, mode)
+            return
         if old_chat_id == chat_id and old_message_id:
             try:
-                await tg_wait(context.bot.edit_message_text(
+                await context.bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=old_message_id,
                     text=text[:3900],
                     reply_markup=reply_markup,
-                ))
+                )
                 await set_panel_identity(chat_id, old_message_id, mode)
                 return
             except BadRequest as e:
                 if "Message is not modified" in str(e):
                     await set_panel_identity(chat_id, old_message_id, mode)
                     return
-                # fall through and create a fresh panel if the old one disappeared / is not editable
-            except TelegramError:
-                pass
-        msg = await tg_wait(context.bot.send_message(chat_id=chat_id, text=text[:3900], reply_markup=reply_markup))
-        await set_panel_identity(chat_id, msg.message_id, mode)
+            except TelegramError as e:
+                log_error("telegram_upsert_edit_error", e, mode=mode)
+            except Exception as e:
+                log_error("telegram_upsert_unexpected", e, mode=mode)
+        await send_fresh_panel(context, chat_id, text, reply_markup, mode)
 
 
 async def edit_query_as_panel(q, text: str, reply_markup: InlineKeyboardMarkup, mode: str = "main") -> None:
     if q.message:
         try:
-            await tg_wait(q.edit_message_text(text[:3900], reply_markup=reply_markup))
+            await q.edit_message_text(text[:3900], reply_markup=reply_markup)
             await set_panel_identity(q.message.chat_id, q.message.message_id, mode)
             return
         except BadRequest as e:
             if "Message is not modified" in str(e):
                 await set_panel_identity(q.message.chat_id, q.message.message_id, mode)
                 return
-            # Callback UI must never stay stuck because an edit failed/raced with live refresh.
             log_error("telegram_edit_query_as_panel_bad_request", e, mode=mode)
             return
         except TelegramError as e:
@@ -608,68 +626,66 @@ async def update_live_panel(app: Application, force: bool = False) -> None:
     s = STORE.load()
     if not bool(s.get("telegram_live_panel")):
         return
-    if str(s.get("telegram_panel_mode") or "main") != "main" and not force:
+    engine = ENGINE
+    running = bool(engine and engine.is_running())
+    # While running, always keep the main scan panel alive even if a settings/API menu was opened.
+    if not running and str(s.get("telegram_panel_mode") or "main") != "main" and not force:
         return
     chat_id = int(s.get("telegram_panel_chat_id") or 0)
     message_id = int(s.get("telegram_panel_message_id") or 0)
     if not chat_id:
         return
-    engine = ENGINE
-    running = bool(engine and engine.is_running())
-    refresh_mode = str(s.get("telegram_panel_refresh_mode") or "edit").lower()
-    text = panel_text()[:3900]
     async with PANEL_LOCK:
-        # Re-read inside the lock in case a menu callback changed mode.
         s2 = STORE.load()
-        if str(s2.get("telegram_panel_mode") or "main") != "main" and not force:
+        now = time.time()
+        created = float(s2.get("telegram_panel_created_ts") or 0.0)
+        cycle = float(s2.get("telegram_panel_cycle_sec") or 600.0)
+        mode = str(s2.get("telegram_panel_mode") or "main")
+        running = bool(ENGINE and ENGINE.is_running())
+        rotate = bool(running and created > 0 and cycle > 0 and now - created >= cycle)
+        if rotate:
+            await delete_all_panels(app)
+            await send_fresh_panel(app, chat_id, panel_text()[:3900], main_menu(), "main")
+            log_event("telegram_panel_rotated", chat_id=chat_id, cycle_sec=cycle)
             return
-        chat_id = int(s2.get("telegram_panel_chat_id") or chat_id)
-        message_id = int(s2.get("telegram_panel_message_id") or message_id)
-        # v0064: while RUNNING, default to delete+send a fresh panel so the panel
-        # stays at the bottom of Telegram. Telegram edits do not move a message.
-        if running and refresh_mode in {"resend", "fresh", "bottom"}:
-            if message_id:
-                try:
-                    await tg_wait(app.bot.delete_message(chat_id=chat_id, message_id=message_id), timeout=4.0)
-                except Exception:
-                    pass
-            try:
-                msg = await tg_wait(app.bot.send_message(chat_id=chat_id, text=text, reply_markup=main_menu()), timeout=8.0)
-                await set_panel_identity(chat_id, msg.message_id, "main")
-                return
-            except Exception as e:
-                log_error("telegram_live_panel_resend_error", e)
-                # fall back to edit below if resend failed
+        # If running, force main mode and edit the current scan panel. Do not send a new message every 5s.
+        if running:
+            mode = "main"
+        elif mode != "main" and not force:
+            return
+        message_id = int(STORE.load().get("telegram_panel_message_id") or 0)
         if not message_id:
-            try:
-                msg = await tg_wait(app.bot.send_message(chat_id=chat_id, text=text, reply_markup=main_menu()), timeout=8.0)
-                await set_panel_identity(chat_id, msg.message_id, "main")
-                return
-            except Exception as e:
-                log_error("telegram_live_panel_send_error", e)
-                return
+            await send_fresh_panel(app, chat_id, panel_text()[:3900], main_menu(), "main")
+            return
         try:
-            await tg_wait(app.bot.edit_message_text(
+            await app.bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=message_id,
-                text=text,
+                text=panel_text()[:3900],
                 reply_markup=main_menu(),
-            ), timeout=8.0)
+            )
+            await set_panel_identity(chat_id, message_id, "main")
         except BadRequest as e:
-            if "Message is not modified" not in str(e):
-                log_error("telegram_live_panel_edit_bad_request", e)
-        except Exception as e:
+            if "Message is not modified" in str(e):
+                return
+            await send_fresh_panel(app, chat_id, panel_text()[:3900], main_menu(), "main")
+            log_error("telegram_live_panel_edit_bad_request", e)
+        except (Forbidden, TelegramError) as e:
             log_error("telegram_live_panel_edit_error", e)
+            try:
+                await send_fresh_panel(app, chat_id, panel_text()[:3900], main_menu(), "main")
+            except Exception:
+                pass
+        except Exception as e:
+            log_error("telegram_live_panel_edit_unexpected", e)
 
 
 async def live_panel_loop(app: Application) -> None:
-    """Smart live-panel refresh.
+    """v0069 clean rollback panel loop.
 
-    Defaults in v0028:
-    - STOPPED: no automatic refresh, so the panel is readable and quiet.
-    - RUNNING without an open position: every 5 seconds.
-    - RUNNING with an open position: every 2 seconds.
-    - Important strategy events still force an immediate refresh via notify().
+    RUNNING: edit one current scan panel every 5 sec.
+    Every 10 min: delete all known scan panels and send one fresh panel down.
+    STOPPED: quiet unless forced by command/button.
     """
     while True:
         try:
@@ -677,26 +693,21 @@ async def live_panel_loop(app: Application) -> None:
             if not bool(s.get("telegram_live_panel")):
                 await asyncio.sleep(2.0)
                 continue
-
             engine = ENGINE
             running = bool(engine and engine.is_running())
-            has_open_position = bool(engine and getattr(engine.stats, "open_position_symbols", []))
-
             if not running:
                 interval = float(s.get("telegram_live_stopped_update_sec") or 0.0)
                 if interval <= 0:
                     await asyncio.sleep(2.0)
                     continue
-            elif has_open_position:
-                interval = float(s.get("telegram_live_fast_update_sec") or 2.0)
             else:
                 interval = float(s.get("telegram_live_update_sec") or 5.0)
-
-            await asyncio.sleep(max(1.0, interval))
+            await asyncio.sleep(max(2.0, interval))
             await update_live_panel(app, force=False)
         except asyncio.CancelledError:
             break
-        except Exception:
+        except Exception as e:
+            log_error("telegram_live_panel_loop_error", e)
             await asyncio.sleep(2.0)
 
 
@@ -705,7 +716,6 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id if update.effective_chat else None
     if not chat_id:
         return
-    # v0064: no helper keyboard spam inside commands; answer direct.
     engine = await ensure_engine(context, chat_id)
     await upsert_panel(
         context,
@@ -722,14 +732,15 @@ async def panel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id if update.effective_chat else None
     if not chat_id:
         return
-    # v0064: no helper keyboard spam inside commands; answer direct.
+    await install_command_keyboard(context, chat_id)
     arg = (context.args[0].lower() if context.args else "show")
     if arg in {"reset", "new"}:
-        await upsert_panel(context, chat_id, panel_text(), main_menu(), mode="main", recreate=True)
+        await delete_all_panels(context.application)
+        await send_fresh_panel(context, chat_id, panel_text(), main_menu(), mode="main")
     elif arg in {"off", "delete"}:
         await delete_stored_panel(context.application)
     else:
-        await upsert_panel(context, chat_id, panel_text(), main_menu(), mode="main", recreate=False)
+        await send_fresh_panel(context, chat_id, panel_text(), main_menu(), mode="main")
 
 
 async def api_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -816,7 +827,7 @@ async def preset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     engine = await ensure_engine(context, chat_id)
     reset_engine_signal_state(engine)
     engine.clear_ignored_symbols()
-    await upsert_panel(context, chat_id, "🌊 Price Tsunami v0064 применён: 10s price-scan, итоговые 65/75% + рост 15п.п., 5 LONG/SHORT, 5x/10x, REAL NET выход.\n\n" + settings_text(), settings_menu(), mode="settings")
+    await upsert_panel(context, chat_id, "🌊 Price Tsunami v0069 применён: 10s price-scan, итоговые 65/75% + рост 15п.п., 5 LONG/SHORT, 5x/10x, REAL NET выход.\n\n" + settings_text(), settings_menu(), mode="settings")
 
 
 async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -935,275 +946,6 @@ async def symbols_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await upsert_panel(context, chat_id, "✅ Whitelist updated:\n" + ", ".join(syms) + "\n\n" + symbols_text(engine), symbols_menu(), mode="symbols")
 
 
-async def send_direct_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str, *, timeout: float = 10.0) -> None:
-    """Send a normal chat message without touching the live panel lock."""
-    await tg_wait(context.bot.send_message(chat_id=chat_id, text=text[:3900]), timeout=timeout)
-
-
-async def reply_direct(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, *, timeout: float = 10.0) -> None:
-    """Reply to the exact command message.
-
-    v0064: commands must return visible messages in chat and never rely on the
-    live panel. If reply_text fails because Telegram/client state is odd, fall
-    back to a normal send_message.
-    """
-    chat_id = update.effective_chat.id if update.effective_chat else None
-    msg = update.effective_message
-    if msg is not None:
-        try:
-            await tg_wait(msg.reply_text(text[:3900]), timeout=timeout)
-            return
-        except Exception:
-            pass
-    if chat_id:
-        await send_direct_message(context, chat_id, text, timeout=timeout)
-
-
-def _tail_file_text(path: Path, max_bytes: int = 250_000) -> str:
-    try:
-        if not path.exists():
-            return ""
-        with path.open("rb") as f:
-            try:
-                f.seek(0, os.SEEK_END)
-                size = f.tell()
-                f.seek(max(0, size - max_bytes), os.SEEK_SET)
-            except Exception:
-                pass
-            data = f.read(max_bytes)
-        text = data.decode("utf-8", errors="replace")
-        if "\n" in text and len(data) >= max_bytes:
-            text = text.split("\n", 1)[1]
-        return text
-    except Exception as e:
-        return f"<tail read error: {e}>"
-
-
-def build_fast_log_export() -> Path:
-    """Fast emergency log export that never calls exchange APIs and avoids heavy pruning.
-
-    This is intentionally simpler than export_full_log(): it tails local log files
-    and writes a small file. The goal is reliability when the bot is half-broken.
-    """
-    from datetime import datetime
-    s = STORE.load()
-    out_dir = Path("logs/exports")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out = out_dir / f"mexc_micro_maker_FAST_log_{s.get('bot_version','v0064')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
-    engine = ENGINE
-    parts: list[str] = []
-    parts.append("MEXC MICRO MAKER FAST DEBUG LOG")
-    parts.append(f"Generated: {datetime.now().isoformat(timespec='seconds')}")
-    parts.append(f"Version: {s.get('bot_version')} instance={BOT_INSTANCE_ID} pid={os.getpid()}")
-    parts.append("\n=== SETTINGS SHORT ===")
-    for k in ["bot_version","trade_profile","live_enabled","telegram_panel_chat_id","telegram_panel_message_id","telegram_panel_mode","telegram_delete_command_messages","telegram_reply_keyboard","market_data_mode","wave_market_signal_mode"]:
-        parts.append(f"{k}: {s.get(k)}")
-    parts.append("\n=== ENGINE SHORT ===")
-    try:
-        if engine is None:
-            parts.append("ENGINE=None")
-        else:
-            parts.append(f"running={bool(engine.is_running())} running_flag={getattr(engine,'running',None)}")
-            st = getattr(engine, 'stats', None)
-            parts.append(f"last_action={getattr(st,'last_action','')}")
-            parts.append(f"last_error={getattr(st,'last_error','')}")
-            parts.append(f"last_scan_ts={getattr(st,'last_scan_ts',0)}")
-            parts.append(f"zero_fee_cache_count={len(getattr(engine,'zero_fee_cache',[]) or [])}")
-            parts.append(f"ui_tasks={list(UI_BG_TASKS.keys())}")
-    except Exception as e:
-        parts.append(f"<engine short error: {e}>")
-    parts.append("\n=== LOG TAIL ===")
-    log_dir = Path(os.getenv("MICRO_MAKER_LOG_DIR", "logs"))
-    for fp in list(sorted(log_dir.glob("log_full.txt.*"))) + [log_dir / "log_full.txt"]:
-        if fp.exists():
-            parts.append(f"\n--- {fp} ---")
-            parts.append(_tail_file_text(fp, max_bytes=220_000))
-    out.write_text("\n".join(parts), encoding="utf-8")
-    return out
-
-
-async def finish_direct_task(context: ContextTypes.DEFAULT_TYPE, chat_id: int | None, text_or_coro, label: str, *, timeout_sec: float = 60.0) -> None:
-    """Run a slow task and always return result/error as a normal chat message."""
-    if not chat_id:
-        return
-    try:
-        if asyncio.iscoroutine(text_or_coro):
-            msg = await asyncio.wait_for(text_or_coro, timeout=max(1.0, float(timeout_sec or 60.0)))
-        else:
-            msg = str(text_or_coro)
-        await send_direct_message(context, chat_id, str(msg)[:3900], timeout=10.0)
-    except asyncio.TimeoutError:
-        await send_direct_message(context, chat_id, f"⏱ {label}: timeout {timeout_sec:.0f}s. Команда не зависла, фон остановлен/сброшен.", timeout=10.0)
-    except Exception as e:
-        try:
-            log_error("direct_task_error", e, label=label, chat_id=chat_id)
-        except Exception:
-            pass
-        await send_direct_message(context, chat_id, f"❌ {label}: {str(e)[:900]}", timeout=10.0)
-
-
-async def mirror_collect_loop(context: ContextTypes.DEFAULT_TYPE, chat_id: int, rounds: int = 90, interval_sec: float = 2.0) -> None:
-    """Background virtual collector for Mirror Lab.
-
-    It runs Price Scan in read-only mode, records Mirror snapshots inside the
-    engine, and never opens/cancels/closes real orders.
-    """
-    engine = await ensure_engine(context, chat_id)
-    log_event("mirror_lab_collect_started", chat_id=chat_id, rounds=rounds, interval_sec=interval_sec)
-    errors = 0
-    completed = 0
-    try:
-        for _ in range(max(1, int(rounds))):
-            if not bool(STORE.load().get("mirror_lab_enabled", False)):
-                break
-            try:
-                await asyncio.wait_for(engine.scan_now_text(), timeout=25.0)
-                completed += 1
-            except asyncio.TimeoutError as e:
-                errors += 1
-                log_error("mirror_lab_collect_scan_timeout", e, chat_id=chat_id)
-            except Exception as e:
-                errors += 1
-                log_error("mirror_lab_collect_scan_error", e, chat_id=chat_id)
-            await asyncio.sleep(max(0.5, float(interval_sec)))
-    finally:
-        snaps = len(getattr(engine, "mirror_lab_snapshots", []) or [])
-        log_event("mirror_lab_collect_finished", chat_id=chat_id, completed=completed, errors=errors, snapshots=snaps)
-        try:
-            if bool(STORE.load().get("mirror_lab_enabled", False)):
-                await send_direct_message(
-                    context,
-                    chat_id,
-                    f"🪞 Mirror Lab сбор завершён/пауза. Снимков: {snaps}.\nКоманда отчёта: /mirror_test report",
-                    timeout=10.0,
-                )
-        except Exception:
-            pass
-
-
-async def mirror_test_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Direct Mirror Lab command handler.
-
-    v0064 fix: no acknowledgement-only response. Every command returns its
-    final result as a normal reply message. Slow collection runs in background,
-    but start/report/stop/clear always give a visible answer immediately.
-    """
-    chat_id = update.effective_chat.id if update.effective_chat else None
-    if not chat_id:
-        return
-
-    try:
-        txt = update.effective_message.text if update.effective_message else "/mirror_test"
-        cmd = txt.split()[0].split("@")[0].lstrip("/").lower()
-    except Exception:
-        txt = "/mirror_test"
-        cmd = "mirror_test"
-    args = [str(a).lower() for a in (context.args or [])]
-
-    if cmd in {"mirror_start", "mirror_on"}:
-        action = "start"
-    elif cmd in {"mirror_report", "mirror_status"}:
-        action = "report"
-    elif cmd in {"mirror_stop", "mirror_off"}:
-        action = "stop"
-    elif cmd in {"mirror_clear", "mirror_reset"}:
-        action = "clear"
-    else:
-        action = args[0] if args else "report"
-
-    try:
-        engine = await asyncio.wait_for(ensure_engine(context, chat_id), timeout=3.0)
-    except Exception as e:
-        await reply_direct(update, context, f"❌ Mirror Lab engine error: {str(e)[:900]}", timeout=8.0)
-        return
-
-    if action in {"start", "on", "run", "enable"}:
-        try:
-            STORE.set("mirror_lab_enabled", True)
-            msg = engine.clear_mirror_lab()
-            existing = UI_BG_TASKS.get("mirror_collect")
-            already = bool(existing and not existing.done())
-            if not already:
-                spawn_ui_task(mirror_collect_loop(context, chat_id), name="mirror_collect")
-            await reply_direct(
-                update,
-                context,
-                "🪞 Mirror Lab START v0064\n\n"
-                "Статус: виртуальный сбор запущен. Реальных сделок нет.\n"
-                f"{msg}\n"
-                f"Collector: {'уже работал' if already else 'запущен'}\n\n"
-                "Проверка:\n"
-                "/doctor — должен показать ui_tasks: mirror_collect\n"
-                "/mirror_report или /mirror_test report — отчёт через 1–3 минуты.",
-                timeout=10.0,
-            )
-        except Exception as e:
-            log_error("mirror_test_start_error", e, chat_id=chat_id)
-            await reply_direct(update, context, f"❌ Mirror START error: {str(e)[:900]}", timeout=8.0)
-        return
-
-    if action in {"stop", "off", "disable"}:
-        try:
-            STORE.set("mirror_lab_enabled", False)
-            task = UI_BG_TASKS.get("mirror_collect")
-            if task and not task.done():
-                task.cancel()
-            report = engine.mirror_lab_report_text()
-            await reply_direct(update, context, "🪞 Mirror Lab STOP v0064\n\n" + report, timeout=10.0)
-        except Exception as e:
-            log_error("mirror_test_stop_error", e, chat_id=chat_id)
-            await reply_direct(update, context, f"❌ Mirror STOP error: {str(e)[:900]}", timeout=8.0)
-        return
-
-    if action in {"clear", "reset"}:
-        try:
-            STORE.set("mirror_lab_enabled", False)
-            task = UI_BG_TASKS.get("mirror_collect")
-            if task and not task.done():
-                task.cancel()
-            msg = engine.clear_mirror_lab()
-            await reply_direct(update, context, "🪞 Mirror Lab CLEAR v0064\n\n" + msg, timeout=8.0)
-        except Exception as e:
-            log_error("mirror_test_clear_error", e, chat_id=chat_id)
-            await reply_direct(update, context, f"❌ Mirror CLEAR error: {str(e)[:900]}", timeout=8.0)
-        return
-
-    if action in {"status", "report", "show", ""}:
-        try:
-            report = engine.mirror_lab_report_text()
-            task = UI_BG_TASKS.get("mirror_collect")
-            collector = "running" if task and not task.done() else "off"
-            await reply_direct(update, context, f"🪞 Mirror Lab REPORT v0064\nCollector: {collector}\n\n" + report, timeout=10.0)
-        except Exception as e:
-            log_error("mirror_test_report_error", e, chat_id=chat_id)
-            await reply_direct(update, context, f"❌ Mirror REPORT error: {str(e)[:900]}", timeout=8.0)
-        return
-
-    await reply_direct(
-        update,
-        context,
-        "🪞 Mirror Lab commands v0064:\n"
-        "/mirror_test start — включить виртуальный сбор\n"
-        "/mirror_test report — показать replay отчёт\n"
-        "/mirror_test stop — остановить сбор\n"
-        "/mirror_test clear — очистить буфер\n\n"
-        "Коротко: /mirror_start /mirror_report /mirror_stop /mirror_clear",
-        timeout=8.0,
-    )
-
-async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id if update.effective_chat else None
-    if not chat_id:
-        return
-    await send_direct_message(context, chat_id, "⏳ /scan принят v0064. Это read-only Price Scan, реальных сделок нет...", timeout=8.0)
-    engine = await ensure_engine(context, chat_id)
-    try:
-        txt = await asyncio.wait_for(engine.scan_now_text(), timeout=60.0)
-    except Exception as e:
-        txt = f"❌ Scan error: {str(e)[:900]}"
-    await send_direct_message(context, chat_id, txt[:3900], timeout=10.0)
-
-
 async def market_mode_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await safe_delete_message(context, update)
     chat_id = update.effective_chat.id if update.effective_chat else None
@@ -1268,10 +1010,11 @@ async def close_all_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     started = time.perf_counter()
+    await safe_delete_message(context, update)
     chat_id = update.effective_chat.id if update.effective_chat else None
     if not chat_id:
         return
-    await send_direct_message(context, chat_id, ping_text(update, started), timeout=8.0)
+    await context.bot.send_message(chat_id=chat_id, text=ping_text(update, started)[:3900])
 
 
 async def balance_text(engine: MicroMakerEngine) -> str:
@@ -1311,27 +1054,24 @@ async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not chat_id:
         return
     engine = await ensure_engine(context, chat_id)
-    await tg_wait(context.bot.send_message(chat_id=chat_id, text=(await balance_text(engine))[:3900]))
+    await context.bot.send_message(chat_id=chat_id, text=(await balance_text(engine))[:3900])
 
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await safe_delete_message(context, update)
     chat_id = update.effective_chat.id if update.effective_chat else None
     if not chat_id:
         return
-    await send_direct_message(context, chat_id, "⏳ /status принят v0064, читаю статус отдельным сообщением...", timeout=8.0)
     engine = await ensure_engine(context, chat_id)
     try:
-        try:
-            await asyncio.wait_for(engine._ensure_client(), timeout=12.0)
-        except Exception:
-            pass
-        txt = await asyncio.wait_for(engine.status_text(), timeout=25.0)
+        txt = await asyncio.wait_for(engine.status_text(), timeout=20.0)
     except Exception as e:
-        txt = f"❌ Status error: {str(e)[:900]}"
-    await send_direct_message(context, chat_id, txt[:3900], timeout=10.0)
+        txt = f"❌ Status error: {str(e)[:500]}"
+    await context.bot.send_message(chat_id=chat_id, text=txt[:3900])
 
 
 async def trades_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await safe_delete_message(context, update)
     chat_id = update.effective_chat.id if update.effective_chat else None
     if not chat_id:
         return
@@ -1344,111 +1084,139 @@ async def trades_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             "total_losses_count": 0,
             "total_estimated_pnl_usdt": 0.0,
         })
-        await send_direct_message(context, chat_id, "✅ Total trade counter reset.\n\n" + engine.trades_counter_text(), timeout=8.0)
+        await context.bot.send_message(chat_id=chat_id, text="✅ Total trade counter reset.\n\n" + engine.trades_counter_text())
         return
-    await send_direct_message(context, chat_id, engine.trades_counter_text(), timeout=8.0)
+    await context.bot.send_message(chat_id=chat_id, text=engine.trades_counter_text()[:3900])
 
 
 async def log_full_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # v0064: text-first log. Default command must always give useful output,
-    # even if Telegram document upload is slow/broken.
+    await safe_delete_message(context, update)
     chat_id = update.effective_chat.id if update.effective_chat else None
     if not chat_id:
         return
+    engine = await ensure_engine(context, chat_id)
     args = [a.lower() for a in (context.args or [])]
     if args and args[0] in {"clear", "reset", "0"}:
         clear_full_log()
         log_event("log_full_cleared_by_user", chat_id=chat_id)
-        await send_direct_message(context, chat_id, "✅ log_full очищен. Новый лог начнёт писаться сразу после следующего действия бота.", timeout=8.0)
+        await context.bot.send_message(chat_id=chat_id, text="✅ log_full очищен. Новый лог начнёт писаться сразу после следующего действия бота.")
         return
-
-    log_event("log_full_fast_requested", chat_id=chat_id, version=STORE.load().get("bot_version"))
-    tail = _tail_file_text(Path(os.getenv("MICRO_MAKER_LOG_DIR", "logs")) / "log_full.txt", max_bytes=3500)
-    if not tail.strip():
-        tail = "Лог пока пустой. Если скан RUNNING, через 5–10 секунд тут должны появиться wave_signal_check / scan_summary."
-    await send_direct_message(context, chat_id, ("📄 log_full v0064 FAST TEXT\n\n" + tail[-3600:])[:3900], timeout=10.0)
-
-    # File upload only on explicit request, so /log_full itself cannot appear to hang.
-    if args and args[0] in {"file", "full", "txt", "document"}:
-        try:
-            path = await asyncio.wait_for(asyncio.to_thread(build_fast_log_export), timeout=5.0)
-            with open(path, "rb") as f:
-                await tg_wait(context.bot.send_document(
-                    chat_id=chat_id,
-                    document=f,
-                    filename=Path(path).name,
-                    caption=f"📄 FAST log {STORE.load().get('bot_version', 'v0064')}",
-                ), timeout=18.0)
-        except Exception as e:
-            log_error("log_full_file_error", e, chat_id=chat_id)
-            await send_direct_message(context, chat_id, f"⚠️ Файл лога не ушёл, но текстовый хвост выше уже отправлен. Ошибка файла: {str(e)[:500]}", timeout=8.0)
+    try:
+        await context.bot.send_message(chat_id=chat_id, text=f"📄 /log_full {STORE.load().get('bot_version')}: собираю и отправляю TXT-файл...")
+        log_event("log_full_export_requested", chat_id=chat_id)
+        path = export_full_log(STORE.load(), engine)
+        caption = f"📄 Full debug log {STORE.load().get('bot_version', 'v0069')}"
+        with open(path, "rb") as f:
+            await asyncio.wait_for(context.bot.send_document(
+                chat_id=chat_id,
+                document=f,
+                filename=Path(path).name,
+                caption=caption[:1000],
+            ), timeout=45.0)
+        await context.bot.send_message(chat_id=chat_id, text="✅ /log_full отправил .txt файл.")
+    except Exception as e:
+        log_error("log_full_export_error", e, chat_id=chat_id)
+        await context.bot.send_message(chat_id=chat_id, text=f"❌ log_full error: {str(e)[:800]}")
 
 
 async def log_tail_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await safe_delete_message(context, update)
     chat_id = update.effective_chat.id if update.effective_chat else None
     if not chat_id:
         return
-    tail = _tail_file_text(Path(os.getenv("MICRO_MAKER_LOG_DIR", "logs")) / "log_full.txt", max_bytes=3500)
-    if not tail.strip():
-        tail = "Лог пока пустой."
-    await send_direct_message(context, chat_id, ("📄 log_tail v0064\n\n" + tail[-3600:])[:3900], timeout=10.0)
+    try:
+        from full_logger import FULL_LOG_PATH
+        if not FULL_LOG_PATH.exists():
+            await context.bot.send_message(chat_id=chat_id, text="📄 log_tail: лог-файл ещё не создан.")
+            return
+        lines = FULL_LOG_PATH.read_text(encoding="utf-8", errors="replace").splitlines()[-25:]
+        text = "\n".join(lines).strip() or "Лог пока пустой."
+        await context.bot.send_message(chat_id=chat_id, text=(f"📄 log_tail {STORE.load().get('bot_version')}\n\n" + text)[-3900:])
+    except Exception as e:
+        await context.bot.send_message(chat_id=chat_id, text=f"❌ log_tail error: {str(e)[:500]}")
+
+
+async def fees_cached_text(engine: MicroMakerEngine | None = None) -> str:
+    e = engine or ENGINE
+    s = STORE.load()
+    if not e:
+        return f"🧾 Fees {s.get('bot_version')}\nEngine не создан."
+    ignored = e._ignored_symbols(s)
+    zero_total = int(getattr(e, "zero_fee_total_count", 0) or len(getattr(e, "zero_fee_cache", []) or []))
+    blocked = int(getattr(e, "zero_fee_blocked_count", 0) or 0)
+    universe = int(getattr(e, "zero_fee_universe_count", 0) or len(getattr(e, "zero_fee_cache", []) or []))
+    return (
+        f"🧾 Fees / Zero-fee cached {s.get('bot_version')}\n\n"
+        f"Zero-fee total/cache: {zero_total}\n"
+        f"Trade universe: {universe}\n"
+        f"Blocked: {blocked}\n"
+        f"Ignored: {len(ignored)}\n\n"
+        f"Fee guard: {'ON' if s.get('require_contract_zero_fee_on_entry') else 'OFF'}\n"
+        f"Only zero-fee: {'ON' if s.get('only_zero_fee') else 'OFF'}\n\n"
+        "Кнопка Fees не делает тяжёлую API-перепроверку, чтобы не вешать панель."
+    )
+
+
+async def fees_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await safe_delete_message(context, update)
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if not chat_id:
+        return
+    engine = await ensure_engine(context, chat_id)
+    await context.bot.send_message(chat_id=chat_id, text=(await fees_cached_text(engine))[:3900])
+
+
+async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await safe_delete_message(context, update)
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if not chat_id:
+        return
+    engine = await ensure_engine(context, chat_id)
+    await context.bot.send_message(chat_id=chat_id, text=f"🔍 /scan {STORE.load().get('bot_version')}: читаю read-only скан...")
+    try:
+        txt = await asyncio.wait_for(engine.scan_now_text(), timeout=35.0)
+    except Exception as e:
+        log_error("scan_cmd_error", e, chat_id=chat_id)
+        txt = f"❌ /scan error: {str(e)[:600]}"
+    await context.bot.send_message(chat_id=chat_id, text=txt[:3900])
+
 
 
 async def doctor_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Fast no-lock diagnostics: proves which process/version is answering."""
+    await safe_delete_message(context, update)
     chat_id = update.effective_chat.id if update.effective_chat else None
     if not chat_id:
         return
     engine = await ensure_engine(context, chat_id)
     s = STORE.load()
+    now = time.time()
     task = getattr(engine, "task", None)
-    loop_state = "none"
-    if task:
-        loop_state = "done" if task.done() else "running"
-    ws_stats = {}
-    try:
-        if getattr(engine, "depth_ws", None):
-            ws_stats = engine.depth_ws.stats()
-    except Exception:
-        ws_stats = {}
-    text = (
+    txt = (
         f"🩺 Doctor {s.get('bot_version')}\n"
-        f"instance: {BOT_INSTANCE_ID}\n"
-        f"pid: {os.getpid()}\n"
-        f"engine.running: {bool(getattr(engine, 'running', False))}\n"
-        f"engine.is_running: {engine.is_running()}\n"
-        f"run_loop task: {loop_state}\n"
-        f"loop_tick_count: {getattr(engine, '_run_loop_tick_count', 0)}\n"
-        f"loop_heartbeat_age: {time.time() - float(getattr(engine, '_last_loop_tick_ts', 0) or 0):.1f}s\n"
-        f"api_errors: {getattr(engine.stats, 'api_errors', 0)}\n"
+        f"running: {bool(engine.is_running())}\n"
+        f"task: {'none' if not task else ('done' if task.done() else 'alive')}\n"
         f"panel_mode: {s.get('telegram_panel_mode')}\n"
         f"panel_msg: {s.get('telegram_panel_message_id')}\n"
-        f"ui_tasks: {', '.join([k for k,v in UI_BG_TASKS.items() if not v.done()]) or '-'}\n"
-        f"last_scan_age: {time.time() - float(getattr(engine.stats, 'last_scan_ts', 0) or 0):.1f}s\n"
-        f"last_error: {getattr(engine.stats, 'last_error', '') or '-'}\n"
-        f"ws: desired={ws_stats.get('desired')} subscribed={ws_stats.get('subscribed')} fresh={ws_stats.get('fresh_books')} err={ws_stats.get('last_error') or '-'}"
+        f"panel_age: {now - float(s.get('telegram_panel_created_ts') or now):.1f}s\n"
+        f"panel_cycle: {s.get('telegram_panel_cycle_sec')}s\n"
+        f"last_scan_age: {now - float(engine.stats.last_scan_ts or 0):.1f}s\n"
+        f"api_errors: {engine.stats.api_errors}\n"
+        f"last_error: {engine.stats.last_error or '-'}\n"
+        f"last_action: {engine.stats.last_action or '-'}\n"
+        f"zero_fee: total={engine.stats.zero_fee_total_count} universe={engine.stats.zero_fee_universe_count}\n"
+        f"ws: books={engine.stats.ws_books} fresh={engine.stats.ws_fresh_books}\n"
     )
-    await tg_wait(context.bot.send_message(chat_id=chat_id, text=text[:3900]), timeout=8.0)
-
-
-async def panel_reset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Forget the old panel id and create a fresh message. Useful after redeploy/version mix."""
-    chat_id = update.effective_chat.id if update.effective_chat else None
-    if not chat_id:
-        return
-    STORE.update({"telegram_panel_message_id": 0, "telegram_panel_chat_id": int(chat_id), "telegram_panel_mode": "main"})
-    await upsert_panel(context, chat_id, panel_text(), main_menu(), mode="main", recreate=True)
-
+    await context.bot.send_message(chat_id=chat_id, text=txt[:3900])
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await safe_delete_message(context, update)
     chat_id = update.effective_chat.id if update.effective_chat else None
     if not chat_id:
         return
-    # v0064: no helper keyboard spam inside commands; answer direct.
+    await install_command_keyboard(context, chat_id)
     s = STORE.load()
     txt = (
-        f"🆘 Price Tsunami Help — {s.get('bot_version', 'v0064')}\n\n"
+        f"🆘 Price Tsunami Help — {s.get('bot_version', 'v0069')}\n\n"
         "Логика торговли:\n"
         "1) Бот держит ALL active zero-fee *_USDT universe, без лимита 250.\n"
         "2) Каждые ~10 секунд сравнивает mid-price каждой монеты.\n"
@@ -1460,7 +1228,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Tsunami: сейчас >=75% и эта же сторона выросла на +15п.п. за 60s → 5 сделок, 10x, REAL NET TP +$0.10.\n"
         "TOP10: 7/10 = NORMAL, 7/10 + рост +2 монеты за 60с = EARLY, 8/10 = TSUNAMI. Входы всё равно из полного zero-fee universe.\n"
         "Важно: 65% и 75% — текущий итоговый процент; +15п.п. уже внутри этого значения, это не 65+15.\n"
-        "v0064 HOLD: вход только когда сигнал подтверждён 4 из 5 checks за ~10s; один шумовой провал не сбрасывает сигнал.\n\n"
+        "v0069 HOLD: вход только когда сигнал подтверждён 4 из 5 checks за ~10s; один шумовой провал не сбрасывает сигнал.\n\n"
         "Выбор монет: не самый перегретый топ, а середина 25-60% same-side candidates.\n"
         "Все сделки открываются одной стороной: либо 5 LONG, либо 5 SHORT. Если MEXC режет быстрые заявки, бот ждёт и повторяет те же слоты, затем добирает заменами.\n"
         "Закрытие: вся корзина по REAL NET equity PnL. Через 10 минут закрывает только ноль/микроплюс; минус не режет, ждёт восстановления.\n\n"
@@ -1468,12 +1236,10 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "▶️ Start Tsunami — запустить режим.\n"
         "⏸ Stop/Pause — только пауза, позиции и ордера не трогает.\n"
         "❌ Close All — отменяет ордера и закрывает позиции market.\n"
-        "🔍 Price Scan — показать текущие LONG/SHORT/NEUTRAL и вывод.\n"
-        "🪞 Mirror Lab — виртуально прогнать плохие модели и их зеркало по накопленным scan-снимкам.\n\n"
-        "Mirror commands: /mirror_test start, /mirror_test report, /mirror_test stop, /mirror_test clear.\n"
+        "🔍 Price Scan — показать текущие LONG/SHORT/NEUTRAL и вывод.\n\n"
         "Команды: /api set KEY SECRET, /balance, /status, /log_full, /symbols clear, /set size 20, /set candidates 0."
     )
-    await send_direct_message(context, chat_id, txt[:3900], timeout=8.0)
+    await upsert_panel(context, chat_id, txt, main_menu(), mode="main")
 
 
 async def _finish_panel_task(
@@ -1488,7 +1254,7 @@ async def _finish_panel_task(
 ) -> None:
     """Execute a slow action and refresh panel afterwards. Used so button callbacks answer instantly.
 
-    v0064: detail screens such as Price Scan should not append the live panel
+    v0069: detail screens such as Price Scan should not append the live panel
     underneath. Slow background actions are deduped and wrapped in a timeout so
     repeated button taps cannot leave endless pending UI tasks.
     """
@@ -1521,71 +1287,6 @@ async def _finish_panel_task(
             pass
 
 
-async def start_engine_direct(context: ContextTypes.DEFAULT_TYPE, chat_id: int | None, engine: MicroMakerEngine) -> None:
-    if not chat_id:
-        return
-    try:
-        msg = await asyncio.wait_for(engine.start(), timeout=35.0)
-        await send_direct_message(context, chat_id, (msg or "▶️ Start done")[:3900], timeout=8.0)
-        await upsert_panel(context, chat_id, panel_text(engine), main_menu(), mode="main", recreate=True)
-    except asyncio.TimeoutError:
-        try:
-            engine.running = False
-            STORE.set("live_enabled", False)
-        except Exception:
-            pass
-        await send_direct_message(context, chat_id, "⏱ Start timeout 35s. Запуск сброшен, чтобы бот не завис. Проверь /doctor и /log_tail.", timeout=8.0)
-    except Exception as e:
-        log_error("start_engine_direct_error", e, chat_id=chat_id)
-        await send_direct_message(context, chat_id, f"❌ Start error: {str(e)[:900]}", timeout=8.0)
-
-
-async def stop_engine_direct(context: ContextTypes.DEFAULT_TYPE, chat_id: int | None, engine: MicroMakerEngine) -> None:
-    if not chat_id:
-        return
-    try:
-        msg = await asyncio.wait_for(engine.stop(close_positions=False), timeout=20.0)
-    except Exception as e:
-        log_error("stop_engine_direct_error", e, chat_id=chat_id)
-        msg = f"❌ Stop error: {str(e)[:900]}"
-    await send_direct_message(context, chat_id, (msg or "⏸ Stop done")[:3900], timeout=8.0)
-    try:
-        await upsert_panel(context, chat_id, panel_text(engine), main_menu(), mode="main", recreate=True)
-    except Exception:
-        pass
-
-
-def fees_cached_text(engine: MicroMakerEngine) -> str:
-    s = STORE.load()
-    zeros = list(getattr(engine, "zero_fee_cache", []) or [])
-    ignored = engine._ignored_symbols(s) if hasattr(engine, "_ignored_symbols") else set()
-    trade = [x for x in zeros if x and x not in ignored and not engine._blocked_symbol(x)] if zeros else []
-    st = getattr(engine, "stats", None)
-    first = ", ".join(trade[:60]) if trade else "-"
-    more = f"\n...ещё {max(0, len(trade)-60)}" if len(trade) > 60 else ""
-    return (
-        f"🧾 Fees / Zero-fee {s.get('bot_version', 'v0064')}\n\n"
-        "Мгновенный cached-отчёт без тяжёлого API-запроса.\n"
-        "Кнопка Fees больше не зависает на полной перепроверке биржи.\n\n"
-        f"Zero-fee cache total: {len(zeros)}\n"
-        f"Trade universe cached: {len(trade)}\n"
-        f"Blocked: {getattr(st, 'zero_fee_blocked_count', 0) if st else 0}\n"
-        f"Ignored: {len(ignored)}\n"
-        f"Fee guard: {'ON' if s.get('require_contract_zero_fee_on_entry') else 'OFF'}\n"
-        f"Only zero-fee: {'ON' if s.get('only_zero_fee') else 'OFF'}\n\n"
-        f"Пары:\n{first}{more}\n\n"
-        "Глубокая API-перепроверка будет отдельной командой, не на основной кнопке."
-    )[:3900]
-
-
-async def fees_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id if update.effective_chat else None
-    if not chat_id:
-        return
-    engine = await ensure_engine(context, chat_id)
-    await send_direct_message(context, chat_id, fees_cached_text(engine), timeout=8.0)
-
-
 async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     data = q.data or ""
@@ -1603,6 +1304,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except TelegramError:
         pass
     engine = await ensure_engine(context, chat_id)
+
     if data == "menu:main":
         await edit_query_as_panel(q, panel_text(engine), main_menu(), mode="main")
         return
@@ -1616,12 +1318,22 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await edit_query_as_panel(q, api_text(), main_menu(), mode="api")
         return
     if data == "mm:start":
-        if engine.is_running():
-            await send_direct_message(context, chat_id, "▶️ Start: бот уже RUNNING. Обновляю панель снизу.", timeout=6.0)
-            await upsert_panel(context, chat_id, panel_text(engine), main_menu(), mode="main", recreate=True)
-            return
-        await send_direct_message(context, chat_id, "▶️ Start принят v0064. Запускаю цикл, результат будет отдельным сообщением.", timeout=6.0)
-        spawn_ui_task(start_engine_direct(context, chat_id, engine), name="ui_start_live")
+        if chat_id:
+            # Start must not toggle/pause. It sends one fresh scan panel down, then the live loop edits it every 5s.
+            await send_fresh_panel(context, chat_id, "▶️ Start принят, запускаю цикл...\n\n" + panel_text(engine), main_menu(), mode="main")
+
+            async def _start_and_refresh():
+                try:
+                    msg = await asyncio.wait_for(engine.start(), timeout=90.0)
+                    log_event("telegram_start_done", chat_id=chat_id, result=msg)
+                    await update_live_panel(context.application, force=True)
+                except Exception as e:
+                    log_error("telegram_start_error", e, chat_id=chat_id)
+                    try:
+                        await context.bot.send_message(chat_id=chat_id, text=f"❌ Start error: {str(e)[:700]}")
+                    except Exception:
+                        pass
+            spawn_ui_task(_start_and_refresh(), name="ui_start_live")
         return
     if data == "mm:stop":
         # Stop is a hard pause only: no order/position cleanup here.
@@ -1633,8 +1345,9 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if not t.done():
                 t.cancel()
         engine.active_tasks.clear()
-        await send_direct_message(context, chat_id, "⏸ Stop/Pause принят v0064. Ордера/позиции НЕ трогаю.", timeout=6.0)
-        spawn_ui_task(stop_engine_direct(context, chat_id, engine), name="ui_stop_live")
+        if chat_id:
+            await context.bot.send_message(chat_id=chat_id, text="⏸ Stop принят. Скан/новые сделки остановлены. Ордера и позиции НЕ трогаю.")
+        spawn_ui_task(_finish_panel_task(context, chat_id, engine, engine.stop(close_positions=False), main_menu(), mode="main", timeout_sec=60.0), name="ui_stop_live")
         return
     if data == "mm:close_all":
         engine.running = False
@@ -1646,28 +1359,30 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await edit_query_as_panel(q, panel_text(engine), main_menu(), mode="main")
         return
     if data == "mm:scan":
-        await send_direct_message(context, chat_id, "🔍 Price Scan v0064: запускаю read-only скан отдельным сообщением...", timeout=5.0)
-        spawn_ui_task(finish_direct_task(context, chat_id, engine.scan_now_text(), "Price Scan", timeout_sec=60.0), name="ui_scan_now_direct")
-        return
-    if data == "mm:mirror":
-        await send_direct_message(context, chat_id, engine.mirror_lab_report_text(), timeout=10.0)
-        await edit_query_as_panel(
-            q,
-            "🪞 Mirror Lab report отправлен отдельным сообщением.\n\n"
-            "Команды:\n/mirror_test start\n/mirror_test report\n/mirror_test stop\n/mirror_test clear",
-            main_menu(),
-            mode="main",
-        )
+        if chat_id:
+            await context.bot.send_message(chat_id=chat_id, text="🔍 Price Scan: read-only скан запущен...")
+            async def _scan_reply():
+                try:
+                    txt = await asyncio.wait_for(engine.scan_now_text(), timeout=35.0)
+                except Exception as e:
+                    log_error("button_scan_error", e, chat_id=chat_id)
+                    txt = f"❌ Price Scan error: {str(e)[:700]}"
+                try:
+                    await context.bot.send_message(chat_id=chat_id, text=txt[:3900])
+                except Exception:
+                    pass
+            spawn_ui_task(_scan_reply(), name="ui_scan_now")
         return
     if data == "mm:balance":
         if chat_id:
-            await tg_wait(context.bot.send_message(chat_id=chat_id, text=(await balance_text(engine))[:3900]))
+            await context.bot.send_message(chat_id=chat_id, text=(await balance_text(engine))[:3900])
         return
     if data == "mm:trades":
         await edit_query_as_panel(q, engine.trades_counter_text(), main_menu(), mode="main")
         return
     if data == "mm:fees":
-        await send_direct_message(context, chat_id, fees_cached_text(engine), timeout=8.0)
+        if chat_id:
+            await context.bot.send_message(chat_id=chat_id, text=(await fees_cached_text(engine))[:3900])
         return
     if data == "symbols:clear":
         STORE.set("allowed_symbols", "")
@@ -1681,7 +1396,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         apply_plus_profile()
         reset_engine_signal_state(engine)
         engine.clear_ignored_symbols()
-        await edit_query_as_panel(q, "🧺 Price Tsunami v0064 применён.\n\n" + settings_text(), settings_menu(), mode="settings")
+        await edit_query_as_panel(q, "🧺 Price Tsunami v0069 применён.\n\n" + settings_text(), settings_menu(), mode="settings")
         return
     if data == "preset:custom":
         STORE.set("trade_profile", "custom")
@@ -1737,18 +1452,46 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
 
+
+async def runtime_watchdog_loop(app: Application) -> None:
+    """Revive the strategy loop if a runtime exception killed it while live_enabled is still true."""
+    while True:
+        try:
+            await asyncio.sleep(5.0)
+            engine = ENGINE
+            if engine is None:
+                continue
+            st = STORE.load()
+            if not bool(st.get("live_enabled")):
+                continue
+            task = getattr(engine, "task", None)
+            if bool(engine.running) and task is not None and not task.done():
+                continue
+            err = ""
+            if task is not None and task.done():
+                try:
+                    task.result()
+                except asyncio.CancelledError:
+                    err = "cancelled"
+                except Exception as e:
+                    err = f"{type(e).__name__}: {e}"
+            log_error("runtime_watchdog_revive", RuntimeError(err or "loop not alive"), live_enabled=True, running=bool(getattr(engine, "running", False)))
+            try:
+                engine.running = False
+                await engine.start()
+                await update_live_panel(app, force=True)
+            except Exception as e:
+                log_error("runtime_watchdog_revive_failed", e)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            log_error("runtime_watchdog_loop_error", e)
+            await asyncio.sleep(2.0)
+
+
 async def post_init(app: Application) -> None:
-    global ENGINE, PANEL_UPDATE_TASK
-    # v0064: force sane Telegram UX. Commands must remain visible and answer directly.
-    try:
-        STORE.update({
-            "telegram_delete_command_messages": False,
-            "telegram_reply_keyboard": False,
-            "telegram_reply_keyboard_delete_hint": False,
-        })
-    except Exception:
-        pass
-    log_event("telegram_post_init", version=STORE.load().get("bot_version"), instance_id=BOT_INSTANCE_ID, pid=os.getpid())
+    global ENGINE, PANEL_UPDATE_TASK, RUNTIME_WATCHDOG_TASK
+    log_event("telegram_post_init", version=STORE.load().get("bot_version"))
     ENGINE = MicroMakerEngine(STORE)
     try:
         await app.bot.set_my_commands([
@@ -1757,95 +1500,49 @@ async def post_init(app: Application) -> None:
             BotCommand("balance", "Баланс USDT и позиции"),
             BotCommand("status", "Полный статус бота"),
             BotCommand("trades", "Счётчик сделок"),
-            BotCommand("log_full", "Быстрый текстовый лог"),
-            BotCommand("log_tail", "Хвост лога текстом"),
-            BotCommand("fees", "Cached zero-fee статус"),
+            BotCommand("log_full", "Полный .txt лог для диагностики"),
+            BotCommand("log_tail", "Хвост текущего лога текстом"),
+            BotCommand("scan", "Разовый read-only Price Scan"),
+            BotCommand("fees", "Cached zero-fee status"),
+            BotCommand("doctor", "Runtime диагностика"),
             BotCommand("help", "Справка"),
             BotCommand("preset", "Plus/custom профиль"),
             BotCommand("market_mode", "all или top10 режим сигнала рынка"),
-            BotCommand("mirror_test", "Mirror Lab: start/report/stop/clear"),
-            BotCommand("mirror_report", "Mirror Lab отчёт"),
             BotCommand("clear_ignored", "Очистить ignored-лист"),
-            BotCommand("doctor", "Диагностика зависаний/версии"),
-            BotCommand("panel_reset", "Создать новую live-панель"),
         ])
     except TelegramError:
         pass
     PANEL_UPDATE_TASK = asyncio.create_task(live_panel_loop(app), name="telegram_live_panel_loop")
+    RUNTIME_WATCHDOG_TASK = asyncio.create_task(runtime_watchdog_loop(app), name="runtime_watchdog_loop")
 
 
 async def post_shutdown(app: Application) -> None:
-    global PANEL_UPDATE_TASK
-    if PANEL_UPDATE_TASK and not PANEL_UPDATE_TASK.done():
-        PANEL_UPDATE_TASK.cancel()
-        try:
-            await PANEL_UPDATE_TASK
-        except asyncio.CancelledError:
-            pass
+    global PANEL_UPDATE_TASK, RUNTIME_WATCHDOG_TASK
+    for task in (PANEL_UPDATE_TASK, RUNTIME_WATCHDOG_TASK):
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
-
-_SINGLE_INSTANCE_LOCK = None
-
-
-def acquire_single_instance_lock() -> None:
-    """Prevent two bot versions with the same Telegram token from running on one host.
-
-    Seeing v0049 and v0055 alternating in Telegram almost always means two old
-    processes/containers are polling the same bot token. This lock stops that
-    on a single server; if the platform runs multiple dynos/containers, scale to
-    exactly one worker as well.
-    """
-    global _SINGLE_INSTANCE_LOCK
-    if fcntl is None:
-        return
-    path = os.getenv("BOT_SINGLE_INSTANCE_LOCK", "/tmp/mexc_micro_maker_bot.lock")
-    fh = open(path, "w")
-    try:
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        raise RuntimeError(
-            "Another mexc_micro_maker_bot process is already running. "
-            "Kill old v0049/v0055 processes or scale workers to 1 before starting this version."
-        )
-    fh.write(f"pid={os.getpid()} instance={BOT_INSTANCE_ID}\n")
-    fh.flush()
-    _SINGLE_INSTANCE_LOCK = fh
-
-
-
-async def telegram_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """v0064: Telegram handler errors must be visible in logs and not kill polling."""
-    try:
-        log_error("telegram_application_error", context.error or Exception("unknown telegram error"), update=str(update)[:500])
-    except Exception:
-        pass
-    try:
-        chat_id = None
-        if isinstance(update, Update) and update.effective_chat:
-            chat_id = update.effective_chat.id
-        if chat_id:
-            await tg_wait(context.bot.send_message(chat_id=chat_id, text=f"❌ Ошибка обработчика: {str(context.error)[:900]}"), timeout=8.0)
-    except Exception:
-        pass
 
 def main() -> None:
-    acquire_single_instance_lock()
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN env is missing")
     app = ApplicationBuilder().token(token).post_init(post_init).post_shutdown(post_shutdown).concurrent_updates(True).build()
-    app.add_error_handler(telegram_error_handler)
     app.add_handler(CommandHandler("start", admin_guard(start_cmd)))
     app.add_handler(CommandHandler("menu", admin_guard(start_cmd)))
     app.add_handler(CommandHandler("ping", admin_guard(ping_cmd)))
     app.add_handler(CommandHandler("balance", admin_guard(balance_cmd)))
     app.add_handler(CommandHandler("status", admin_guard(status_cmd)))
-    app.add_handler(CommandHandler("scan", admin_guard(scan_cmd)))
     app.add_handler(CommandHandler("trades", admin_guard(trades_cmd)))
     app.add_handler(CommandHandler("log_full", admin_guard(log_full_cmd)))
-    app.add_handler(CommandHandler("fees", admin_guard(fees_cmd)))
-    app.add_handler(CommandHandler("log", admin_guard(log_full_cmd)))
     app.add_handler(CommandHandler("log_tail", admin_guard(log_tail_cmd)))
+    app.add_handler(CommandHandler("scan", admin_guard(scan_cmd)))
+    app.add_handler(CommandHandler("fees", admin_guard(fees_cmd)))
+    app.add_handler(CommandHandler("doctor", admin_guard(doctor_cmd)))
     app.add_handler(CommandHandler("help", admin_guard(help_cmd)))
     app.add_handler(CommandHandler("panel", admin_guard(panel_cmd)))
     app.add_handler(CommandHandler("api", admin_guard(api_cmd)))
@@ -1853,20 +1550,13 @@ def main() -> None:
     app.add_handler(CommandHandler("set", admin_guard(set_cmd)))
     app.add_handler(CommandHandler("symbols", admin_guard(symbols_cmd)))
     app.add_handler(CommandHandler("market_mode", admin_guard(market_mode_cmd)))
-    app.add_handler(CommandHandler("mirror_test", admin_guard(mirror_test_cmd)))
-    app.add_handler(CommandHandler("mirror_start", admin_guard(mirror_test_cmd)))
-    app.add_handler(CommandHandler("mirror_report", admin_guard(mirror_test_cmd)))
-    app.add_handler(CommandHandler("mirror_stop", admin_guard(mirror_test_cmd)))
-    app.add_handler(CommandHandler("mirror_clear", admin_guard(mirror_test_cmd)))
     app.add_handler(CommandHandler("ignore", admin_guard(ignore_cmd)))
     app.add_handler(CommandHandler("clear_ignored", admin_guard(clear_ignored_cmd)))
-    app.add_handler(CommandHandler("doctor", admin_guard(doctor_cmd)))
-    app.add_handler(CommandHandler("panel_reset", admin_guard(panel_reset_cmd)))
     app.add_handler(CommandHandler("close_all", admin_guard(close_all_cmd)))
     app.add_handler(CommandHandler("closeall", admin_guard(close_all_cmd)))
     app.add_handler(CallbackQueryHandler(admin_guard(callback)))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_guard(api_plaintext_cmd)))
-    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True, close_loop=False)
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":

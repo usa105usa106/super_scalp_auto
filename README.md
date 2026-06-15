@@ -1,33 +1,75 @@
-# MEXC Micro Maker Bot v0064 — Stable Panel Runtime
+# MEXC Micro Maker Bot — v0069 Clean Rollback Stable
 
-Главная цель v0064 — не добавлять новые торговые идеи, а стабилизировать Telegram/runtime:
+v0069 is a clean rollback from the last pre-Mirror stable branch. Mirror Lab / reverse bot code is removed completely.
 
-- live-панель в режиме RUNNING обновляется свежим сообщением снизу (`telegram_panel_refresh_mode=resend`), потому что Telegram edit не поднимает старое сообщение вниз;
-- `/log_full` по умолчанию сразу присылает текстовый FAST-log и не висит на отправке файла;
-- файл лога отправляется только явно: `/log_full file`;
-- кнопка Fees показывает cached zero-fee статус без тяжёлой полной API-перепроверки;
-- Start/Stop дают финальный ответ отдельным сообщением и не должны оставлять только “принято”;
-- Start не должен превращаться в Stop/Pause при первом нажатии;
-- первый scan tick после старта не блокируется повторным balance/positions private-check;
-- сохранены Mirror Lab virtual тесты и команды.
+## Main point
 
-## Проверки, прогнанные локально
+This build restores the original Price Tsunami logic and fixes only runtime/panel behavior:
 
-```bash
-python -m py_compile *.py tests/*.py
-python tests/virtual_smoke_test.py
-python tests/freeze_watchdog_test.py
-python tests/telegram_runtime_test.py
-python tests/callback_audit.py
-```
+- no Mirror Lab
+- no virtual bad-bot collector
+- no command-deletion spam
+- `/log_full` sends a real `.txt` file by default
+- `/log_tail` sends recent log lines as text
+- `/scan` is read-only and answers separately
+- Fees button uses cached status and does not run a heavy API recheck
+- Start Tsunami does not toggle into pause
+- `/start` only opens a panel; it does not start trading
 
-Ожидаемый результат:
+## Panel lifecycle
+
+Required behavior:
+
+1. Start Tsunami sends one fresh scan panel down.
+2. While running, the same panel is edited every 5 seconds.
+3. The panel is not deleted every 5 seconds.
+4. After 10 minutes, all known scan panels are deleted and one fresh panel is sent down.
+5. The new panel is edited every 5 seconds for the next 10 minutes.
+
+Settings:
 
 ```text
-VIRTUAL_SMOKE_TEST_OK v0064
-FREEZE_WATCHDOG_TEST_OK v0064
-TELEGRAM_RUNTIME_TEST_OK v0064
-CALLBACK_AUDIT_OK callbacks=86
+telegram_live_update_sec = 5
+telegram_live_fast_update_sec = 5
+telegram_panel_cycle_sec = 600
+telegram_panel_refresh_mode = edit_rotate
+telegram_delete_command_messages = false
+telegram_reply_keyboard = false
 ```
 
-Живой MEXC/Telegram из среды сборки не запускался.
+## Diagnostics
+
+Commands:
+
+```text
+/ping
+/doctor
+/log_full
+/log_tail
+/scan
+/fees
+```
+
+## Tests run
+
+```text
+python -m py_compile *.py tests/*.py
+python tests/panel_lifecycle_test.py
+python tests/top10_fire_test.py
+python tests/no_mirror_test.py
+```
+
+Expected:
+
+```text
+PANEL_LIFECYCLE_TEST_OK v0069
+TOP10_FIRE_TEST_OK v0069
+NO_MIRROR_TEST_OK v0069
+```
+
+## Version
+
+```text
+bot_version = v0069
+trade_profile = wave_price_tsunami_v0069
+```

@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import math
 import random
 import time
-from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Any
@@ -70,18 +68,12 @@ class MicroMakerEngine:
         self.stats = EngineStats()
         self.depth_ws: MexcDepthWebSocket | None = None
         self._last_logged_scan_ts = 0.0
-        # v0064: freeze guards / cheap scan caches.
-        self._last_loop_tick_ts = 0.0
-        self._run_loop_tick_count = 0
-        self._last_risk_balance_ts = 0.0
-        self._last_existing_positions_ts = 0.0
-        self._cached_existing_positions: list[dict[str, Any]] = []
         self.cooldown_until_ts = 0.0
         self.last_trade_closed_ts = 0.0
         self.mid_history: dict[str, list[tuple[float, float, float]]] = {}
         self.wave_candidate_side: str | None = None
         self.wave_candidate_count: int = 0
-        # v0064: market signal hold/stability guard. A one-tick acceleration spike
+        # v0069: market signal hold/stability guard. A one-tick acceleration spike
         # must not fire a basket. The signal is sampled over a time window,
         # so one noisy failed check does not fully reset a valid wave.
         self.wave_signal_hold_key: str | None = None
@@ -94,15 +86,11 @@ class MicroMakerEngine:
         self.wave_signal_mode_last: str = "all_zero_total"
         self.last_wave_vote_rows: list[dict[str, Any]] = []
         self.last_wave_vote_summary: dict[str, Any] = {}
-        # v0064: optional TOP10 leader signal mode. Leaders decide only market
+        # v0069: optional TOP10 leader signal mode. Leaders decide only market
         # direction; entries are still picked from the full zero-fee universe.
         self.last_wave_leader_symbols: list[str] = []
         self.last_wave_leader_vote_rows: list[dict[str, Any]] = []
         self.last_wave_leader_vote_summary: dict[str, Any] = {}
-        # v0064 Mirror Lab: virtual-only replay buffer. No real orders are sent.
-        self.mirror_lab_snapshots: list[dict[str, Any]] = []
-        self.mirror_lab_last_report: dict[str, Any] = {}
-        self.mirror_lab_log_path = Path("logs/mirror_lab_events.jsonl")
         log_event("engine_init", version=self._settings().get("bot_version"))
 
     def _log_event(self, event: str, **data: Any) -> None:
@@ -229,7 +217,7 @@ class MicroMakerEngine:
         # indexes and tokenized tickers without this substring remain allowed.
         if "STOCK" in sym:
             return True
-        # v0064: the account balance/margin shown by MEXC is USDT. Contracts like
+        # v0069: the account balance/margin shown by MEXC is USDT. Contracts like
         # SOL_USDC/BTC_USDC require USDC collateral, so MEXC returns
         # "Balance insufficient" with available=0 even when USDT is free.
         # Basket mode must therefore trade only *_USDT contracts by default.
@@ -651,7 +639,7 @@ class MicroMakerEngine:
     async def _ensure_market_ws(self, symbols: list[str], s: dict[str, Any]) -> None:
         """Start/refresh WS subscriptions for fast depth scanning.
 
-        v0064 rule: 0 means ALL. The price vote must be based on the real
+        v0069 rule: 0 means ALL. The price vote must be based on the real
         active zero-fee universe count, not on an arbitrary 250-symbol cap.
         """
         if str(s.get("market_data_mode") or "websocket").lower() != "websocket" or not bool(s.get("ws_depth_enabled")):
@@ -772,19 +760,14 @@ class MicroMakerEngine:
         self.cooldown_until_ts = 0.0
         self.last_trade_closed_ts = 0.0
         try:
-            bal = await asyncio.wait_for(self.client.fetch_balance(), timeout=max(4.0, float(self._settings().get("mexc_private_timeout") or 15.0))) if self.client else {}
+            bal = await self.client.fetch_balance() if self.client else {}
             self.stats.start_equity = float((bal.get("USDT") or {}).get("total") or 0)
         except Exception as e:
             self.stats.last_error = f"balance: {e}"
             self._log_error("start_balance_error", e)
-        # v0064: do not repeat slow private balance/positions checks immediately
-        # on the very first scan tick; start() just did the balance read.
-        now = time.time()
-        self._last_risk_balance_ts = now
-        self._last_existing_positions_ts = now
         self.task = asyncio.create_task(self._run_loop(), name="micro_maker_loop")
         self._log_event("start_success", start_equity=self.stats.start_equity)
-        return "▶️ Price Tsunami v0064 запущен. Схема: price-scan 10s по активным zero-fee монетам → LONG/SHORT/NEUTRAL проценты → 5 сделок одной стороной → закрытие всей корзины по REAL NET PnL."
+        return "▶️ Price Tsunami v0069 запущен. Схема: price-scan 10s по активным zero-fee монетам → LONG/SHORT/NEUTRAL проценты → 5 сделок одной стороной → закрытие всей корзины по REAL NET PnL."
 
     async def stop(self, close_positions: bool = False) -> str:
         self._log_event("stop_requested", close_positions=close_positions, active_tasks=list(self.active_tasks.keys()))
@@ -1021,7 +1004,7 @@ class MicroMakerEngine:
     def quick_status_text(self) -> str:
         """Clean live panel for Price Tsunami mode. No REST calls here.
 
-        v0064 UI rule: market scan blocks are ALWAYS visible, even when the
+        v0069 UI rule: market scan blocks are ALWAYS visible, even when the
         basket is already open. Debug/runtime details are kept out of the main
         panel so the Telegram message stays readable.
         """
@@ -1132,18 +1115,9 @@ class MicroMakerEngine:
         friendly_error = self._friendly_error(self.stats.last_error) or ""
         if friendly_error:
             error_block = f"\n\nОШИБКА\n{friendly_error}"
-        # v0064: make a frozen scanner visible on the panel instead of silently showing an old message.
-        try:
-            if self.is_running():
-                hb_age = time.time() - float(getattr(self, "_last_loop_tick_ts", 0.0) or 0.0)
-                scan_age = time.time() - float(getattr(self.stats, "last_scan_ts", 0.0) or 0.0)
-                if hb_age > 30 or scan_age > 45:
-                    error_block += f"\n\nDIAG\nloop age {hb_age:.0f}s | scan age {scan_age:.0f}s | ticks {getattr(self, '_run_loop_tick_count', 0)}"
-        except Exception:
-            pass
 
         lines = [
-            f"🌊 Price Tsunami {s.get('bot_version', 'v0064')}",
+            f"🌊 Price Tsunami {s.get('bot_version', 'v0069')}",
             f"{state} • {last_update} • up {h:02d}:{m:02d}:{sec:02d}{cooldown_txt}",
             "",
             "РЫНОК",
@@ -1203,7 +1177,7 @@ class MicroMakerEngine:
             await self._ensure_client()
             rows = await self._refresh_market_scan(s, force=True)
             # Build the same decision text the live loop uses, but do not open trades here.
-            # v0064: scan_now must be read-only for signal/hold state; pressing the
+            # v0069: scan_now must be read-only for signal/hold state; pressing the
             # Price Scan button must not help satisfy HOLD checks or reset live state.
             saved_signal_state = (
                 list(self.wave_dominance_history),
@@ -1284,7 +1258,7 @@ class MicroMakerEngine:
             hold_checks = int(s.get('wave_signal_hold_checks') or 5)
             hold_sec = float(s.get('wave_signal_hold_sec') or 10.0)
             return (
-                f"🔍 Price Scan {s.get('bot_version', 'v0064')}\n"
+                f"🔍 Price Scan {s.get('bot_version', 'v0069')}\n"
                 f"{state} • {self._local_time_text(s)} • up {hh:02d}:{mm:02d}:{ss:02d}\n\n"
                 "РЫНОК\n"
                 f"Signal: {'TOP10 leaders' if v.get('signal_mode') == 'top10_leaders' else 'ALL zero total'}\n"
@@ -1333,51 +1307,34 @@ class MicroMakerEngine:
 
     async def _run_loop(self) -> None:
         self._log_event("run_loop_started")
-        await self._notify("✅ Price Tsunami v0064 started: freeze-guard loop ON; ALL mode 65/75% +15п.п.; TOP10 7/10 normal, 7/10 +2 early, 8/10 tsunami; HOLD 4/5 за ~10s.")
-
-        async def one_tick(s: dict[str, Any]) -> None:
-            self._last_loop_tick_ts = time.time()
-            self._run_loop_tick_count += 1
-            await self._risk_guard(s)
-            await self._cleanup_tasks()
-            if bool(s.get("wave_basket_enabled", False)):
-                await self._wave_loop_tick(s)
-            else:
-                # Background scan runs even when all slots are busy.
-                await self._refresh_market_scan(s, force=False)
-                active_symbols = set(self.active_tasks.keys()) | set(self.stats.open_position_symbols)
-                target_slots = min(int(s.get("max_positions") or 1), int(s.get("symbols_limit") or 1))
-                capacity = max(0, target_slots - len(active_symbols))
-                if capacity > 0:
-                    symbols = await self._select_symbols(s, capacity=capacity)
-                    for sym in symbols:
-                        if capacity <= 0:
-                            break
-                        if sym in self.active_tasks:
-                            continue
-                        task = asyncio.create_task(self._trade_cycle(sym), name=f"trade_{sym}")
-                        self.active_tasks[sym] = task
-                        capacity -= 1
-            await asyncio.sleep(max(0.05, float(s.get("cycle_sleep_ms") or 250) / 1000.0))
-
+        await self._notify("✅ Price Tsunami v0069 started: ALL mode 65/75% +15п.п.; TOP10 mode 7/10 normal, 7/10 +2 early, 8/10 tsunami; HOLD 4/5 за ~10s; entries from full zero-fee universe.")
         while self.running:
             try:
                 s = self._settings()
-                tick_timeout = max(5.0, float(s.get("run_loop_tick_timeout_sec") or 22.0))
-                await asyncio.wait_for(one_tick(s), timeout=tick_timeout)
+                await self._risk_guard(s)
+                await self._cleanup_tasks()
+                if bool(s.get("wave_basket_enabled", False)):
+                    await self._wave_loop_tick(s)
+                else:
+                    # Background scan runs even when all slots are busy. A better coin will be used as soon as capacity frees.
+                    await self._refresh_market_scan(s, force=False)
+                    active_symbols = set(self.active_tasks.keys()) | set(self.stats.open_position_symbols)
+                    target_slots = min(int(s.get("max_positions") or 1), int(s.get("symbols_limit") or 1))
+                    capacity = max(0, target_slots - len(active_symbols))
+                    if capacity > 0:
+                        symbols = await self._select_symbols(s, capacity=capacity)
+                        for sym in symbols:
+                            if capacity <= 0:
+                                break
+                            if sym in self.active_tasks:
+                                continue
+                            task = asyncio.create_task(self._trade_cycle(sym), name=f"trade_{sym}")
+                            self.active_tasks[sym] = task
+                            capacity -= 1
+                await asyncio.sleep(max(0.05, float(s.get("cycle_sleep_ms") or 250) / 1000.0))
             except asyncio.CancelledError:
                 self._log_event("run_loop_cancelled")
                 break
-            except asyncio.TimeoutError as e:
-                self.stats.api_errors += 1
-                self.stats.last_error = f"run loop tick timeout > {float(self._settings().get('run_loop_tick_timeout_sec') or 22.0):.0f}s; scan reset"
-                self._log_error("run_loop_tick_timeout", e, api_errors=self.stats.api_errors, last_scan_ts=self.stats.last_scan_ts)
-                # Reset WS cache on a stuck tick; next iteration will rebuild it.
-                try:
-                    await self._stop_market_ws()
-                except Exception:
-                    pass
-                await asyncio.sleep(1.0)
             except Exception as e:
                 self.stats.api_errors += 1
                 self.stats.last_error = str(e)[:240]
@@ -1410,14 +1367,9 @@ class MicroMakerEngine:
             await self._notify("🚨 Max consecutive losses reached. Risk stop.")
             await self.stop(close_positions=True)
             return
-        now = time.time()
-        # v0064: do not call private balance API on every 100ms strategy tick.
-        # A stuck/private request was enough to make the whole live scan look frozen.
-        bal_interval = max(3.0, float(s.get("risk_guard_balance_interval_sec") or 12.0))
-        if self.stats.start_equity > 0 and self.client and now - self._last_risk_balance_ts >= bal_interval:
-            self._last_risk_balance_ts = now
+        if self.stats.start_equity > 0 and self.client:
             try:
-                bal = await asyncio.wait_for(self.client.fetch_balance(), timeout=max(4.0, float(s.get("mexc_private_timeout") or 15.0)))
+                bal = await self.client.fetch_balance()
                 usdt = bal.get("USDT") or {}
                 equity = float(usdt.get("total") or 0)
                 self.stats.live_equity = equity
@@ -1428,8 +1380,8 @@ class MicroMakerEngine:
                     self._log_event("risk_stop_daily_loss", start_equity=self.stats.start_equity, equity=equity, limit=s.get("daily_loss_limit_usdt"))
                     await self._notify(f"🛑 Daily loss limit hit: start={self.stats.start_equity:.4f}, now={equity:.4f}")
                     await self.stop(close_positions=True)
-            except Exception as e:
-                self._log_error("risk_guard_balance_error", e)
+            except Exception:
+                pass
         now = time.time()
         self.stats.trade_timestamps = [x for x in self.stats.trade_timestamps if now - x < 3600]
 
@@ -1440,7 +1392,7 @@ class MicroMakerEngine:
         ignored = self._ignored_symbols(s)
 
         def apply_scan_cap(pool: list[str]) -> list[str]:
-            # v0064: max_zero_fee_scan_symbols <= 0 means ALL symbols, no 250 cap.
+            # v0069: max_zero_fee_scan_symbols <= 0 means ALL symbols, no 250 cap.
             limit = int(s.get("max_zero_fee_scan_symbols") or 0)
             return pool[:limit] if limit > 0 else pool
 
@@ -1553,14 +1505,8 @@ class MicroMakerEngine:
             if self.stats.ws_books == 0:
                 await asyncio.sleep(max(0.0, float(s.get("ws_warmup_ms") or 350) / 1000.0))
 
-        # v0064: scanner depth requirement must be cheap/read-only. Do not fetch
-        # private balance for every market scan; use cached/start equity instead.
         try:
-            if str(s.get("position_size_mode") or "balance_percent").lower() == "fixed_usdt":
-                margin_usdt = max(0.0, float(s.get("margin_per_position_usdt") or 0.0))
-            else:
-                equity_ref = float(self.stats.live_equity or self.stats.start_equity or 0.0)
-                margin_usdt = max(0.0, equity_ref * max(0.0, float(s.get("position_margin_percent") or 10.0)) / 100.0)
+            margin_usdt, _ = await self._position_margin_usdt(s)
         except Exception:
             margin_usdt = 0.0
         leverage = max(1, int(s.get("leverage") or 5))
@@ -1635,7 +1581,7 @@ class MicroMakerEngine:
                     add_scan_detail(sym, "reject", "depth", bid=bid, ask=ask, spread_ticks=spread_ticks, depth_bid=depth_b, depth_ask=depth_a, depth_min=depth_min, required_depth=required_depth, source=book.get("source"))
                     continue
                 imbalance = max(depth_b / max(depth_a, 1e-9), depth_a / max(depth_b, 1e-9))
-                # v0064: Price Tsunami no longer uses the old order-book
+                # v0069: Price Tsunami no longer uses the old order-book
                 # imbalance/edge direction filter to decide whether a coin is a
                 # candidate. Direction is price-vote only: price rose over 10s =>
                 # LONG, price fell => SHORT. Order book checks remain only as
@@ -1672,7 +1618,7 @@ class MicroMakerEngine:
                     em, top_score, micro_score = {}, 0.0, 0.0
                 move_ticks, move_age = self._recent_move_ticks(sym, float(s.get("wave_lookback_sec") or s.get("basket_rebound_lookback_sec") or 20.0), tick)
                 move_pct, move_pct_age = vote_move_pct, vote_age
-                # v0064: score is no longer the market-direction source. Keep it only
+                # v0069: score is no longer the market-direction source. Keep it only
                 # as secondary display/ranking; the wave detector uses move_pct votes.
                 wave_score = min(abs(float(move_pct or 0.0)) * 120.0, 30.0) if bool(s.get("wave_basket_enabled", False)) else 0.0
                 score = depth_score + spread_score + imbalance_score + volume_score + top_score + micro_score + wave_score
@@ -1680,7 +1626,7 @@ class MicroMakerEngine:
                     "symbol": sym,
                     "score": score,
                     "vote": vote,
-                    # v0064: in Price Tsunami the trade side comes from the 10s
+                    # v0069: in Price Tsunami the trade side comes from the 10s
                     # price vote, not from the old order-book edge/imbalance bias.
                     "bias": bias,
                     "spread_ticks": spread_ticks,
@@ -1719,7 +1665,7 @@ class MicroMakerEngine:
             scored = [r for r in scored if float(r.get("score") or 0) >= min_score]
             if before_count > len(scored):
                 reject_counts["score"] = reject_counts.get("score", 0) + (before_count - len(scored))
-        # v0064: denominator must be the whole selected universe. If a symbol has
+        # v0069: denominator must be the whole selected universe. If a symbol has
         # no fresh WS book / no 10s price history / scan error, count it as NEUTRAL
         # instead of silently shrinking 377 coins into e.g. 352 votes.
         voted_symbols = {MexcFuturesClient.contract_id(r.get("symbol")) for r in wave_vote_rows if r.get("symbol")}
@@ -1737,7 +1683,7 @@ class MicroMakerEngine:
         vote_summary = self._summarize_wave_votes(wave_vote_rows)
         self.last_wave_vote_rows = wave_vote_rows
         self.last_wave_vote_summary = vote_summary
-        # v0064: precompute TOP10 leaders from the same full zero-fee pool.
+        # v0069: precompute TOP10 leaders from the same full zero-fee pool.
         # This does not reduce the trade universe; it only gives an optional
         # market-direction signal source.
         leader_symbols = self._top_liquid_leader_symbols(pool, s)
@@ -1766,9 +1712,6 @@ class MicroMakerEngine:
             self.stats.last_action = f"scan: valid books below min_score={min_score:g} ({self._format_reject_counts()})"
         else:
             self.stats.last_action = f"scan: no symbol passed filters ({self._format_reject_counts()})"
-        # v0064 Mirror Lab records only compact virtual snapshots. It does not
-        # affect signal/hold state and never sends orders.
-        self._record_mirror_snapshot(all_valid_scored, s)
         self._log_event("scan_summary", force=force, pool_count=len(pool), active_vote_count=vote_summary.get("active", 0), vote_summary=vote_summary, leader_symbols=leader_symbols, leader_vote_summary=leader_vote_summary, valid_count=len(scored), raw_valid_count=len(all_valid_scored), min_trade_score=min_score, reject_counts=reject_counts, top=scored[:10], raw_top=all_valid_scored[:10], details_logged=len(scan_details), details=scan_details)
         return scored
 
@@ -1871,7 +1814,7 @@ class MicroMakerEngine:
     def _recent_move_pct(self, symbol: str, lookback_sec: float) -> tuple[float | None, float]:
         """Return mid-price percent move over lookback window, plus sample age.
 
-        v0064 Wave Price Tsunami Basket deliberately uses this simple fact instead of
+        v0069 Wave Price Tsunami Basket deliberately uses this simple fact instead of
         internal score: price now versus price N seconds ago.
         """
         sid = MexcFuturesClient.contract_id(symbol)
@@ -2004,7 +1947,7 @@ class MicroMakerEngine:
         else:
             forced = None
 
-        # v0064 Wave Price Tsunami Basket: market direction is not taken from the old
+        # v0069 Wave Price Tsunami Basket: market direction is not taken from the old
         # book score. A coin votes LONG when its mid-price rose over the price
         # lookback, SHORT when it fell. This makes the wave detector transparent:
         # count rose/fell coins every ~10 seconds, then fire the basket.
@@ -2133,267 +2076,8 @@ class MicroMakerEngine:
                     break
         return picked
 
-    # ------------------------- Mirror Lab v0064 -------------------------
-    def clear_mirror_lab(self) -> str:
-        """Clear the virtual-only mirror lab buffer and last report."""
-        self.mirror_lab_snapshots = []
-        self.mirror_lab_last_report = {}
-        try:
-            self.mirror_lab_log_path.parent.mkdir(parents=True, exist_ok=True)
-            self.mirror_lab_log_path.write_text("", encoding="utf-8")
-        except Exception:
-            pass
-        return "🪞 Mirror Lab очищен: виртуальные снимки и отчёт сброшены."
-
-    def _record_mirror_snapshot(self, rows: list[dict[str, Any]], s: dict[str, Any]) -> None:
-        """Record a compact scan snapshot for accelerated virtual replay.
-
-        This never opens orders and never mutates live trading decisions. It is a
-        small rolling tape of already-scanned prices/books, used by /mirror_test
-        to replay bad models and their inverse side quickly.
-        """
-        if not bool(s.get("mirror_lab_enabled", False)):
-            return
-        now = time.time()
-        compact: list[dict[str, Any]] = []
-        for r in rows or []:
-            sym = MexcFuturesClient.contract_id(r.get("symbol"))
-            vote = str(r.get("vote") or r.get("bias") or "").lower()
-            if not sym or vote not in {"long", "short"}:
-                continue
-            bid = float(r.get("bid") or 0.0)
-            ask = float(r.get("ask") or 0.0)
-            if bid <= 0 or ask <= 0 or ask < bid:
-                continue
-            compact.append({
-                "symbol": sym,
-                "vote": vote,
-                "bid": bid,
-                "ask": ask,
-                "mid": (bid + ask) / 2.0,
-                "score": float(r.get("score") or 0.0),
-                "move_pct": float(r.get("move_pct") or 0.0),
-                "spread_ticks": float(r.get("spread_ticks") or 0.0),
-                "depth_min": float(r.get("depth_min") or 0.0),
-            })
-        if not compact:
-            return
-        summary = self._summarize_wave_votes(getattr(self, "last_wave_vote_rows", []) or [])
-        leader_summary = self._summarize_wave_votes(getattr(self, "last_wave_leader_vote_rows", []) or [])
-        snap = {
-            "ts": now,
-            "rows": compact,
-            "summary": summary,
-            "leader_summary": leader_summary,
-        }
-        # Avoid duplicates from forced scan presses in the same second.
-        if self.mirror_lab_snapshots and now - float(self.mirror_lab_snapshots[-1].get("ts") or 0.0) < 0.75:
-            self.mirror_lab_snapshots[-1] = snap
-        else:
-            self.mirror_lab_snapshots.append(snap)
-        max_snaps = max(50, int(s.get("mirror_lab_snapshot_max") or 1800))
-        self.mirror_lab_snapshots = self.mirror_lab_snapshots[-max_snaps:]
-
-    def _mirror_rows_by_symbol(self, snap: dict[str, Any]) -> dict[str, dict[str, Any]]:
-        return {str(r.get("symbol")): r for r in (snap.get("rows") or []) if r.get("symbol")}
-
-    def _mirror_pick(self, rows: list[dict[str, Any]], side: str, mode: str, need: int = 5) -> list[dict[str, Any]]:
-        side_rows = [r for r in rows if str(r.get("vote")) == side and r.get("move_pct") is not None]
-        if len(side_rows) < need:
-            return []
-        # Strength is absolute 10s price movement. These deliberately bad models
-        # are virtual only; they are not used by live execution unless a future
-        # mirror live gate explicitly allows it.
-        ranked = sorted(side_rows, key=lambda r: abs(float(r.get("move_pct") or 0.0)), reverse=True)
-        if mode in {"bad_top_chaser", "bad_late_momentum", "bad_no_hold"}:
-            return ranked[:need]
-        if mode == "bad_bottom_catcher":
-            return list(reversed(ranked))[:need]
-        if mode == "bad_random_noise":
-            # deterministic pseudo-random per snapshot content, so repeated reports are stable
-            return sorted(side_rows, key=lambda r: (str(r.get("symbol"))))[:need]
-        return ranked[:need]
-
-    def _mirror_bad_signals(self, snap: dict[str, Any], s: dict[str, Any]) -> list[dict[str, Any]]:
-        rows = list(snap.get("rows") or [])
-        summary = snap.get("summary") or {}
-        leader_summary = snap.get("leader_summary") or {}
-        need = max(1, int(s.get("wave_positions") or 5))
-        long_n = int(summary.get("long") or 0)
-        short_n = int(summary.get("short") or 0)
-        side = "long" if long_n >= short_n else "short"
-        opposite = "short" if side == "long" else "long"
-        signals: list[dict[str, Any]] = []
-
-        def add(model: str, model_side: str, pick_mode: str, reason: str) -> None:
-            picks = self._mirror_pick(rows, model_side, pick_mode, need=need)
-            if len(picks) >= need:
-                signals.append({
-                    "model": model,
-                    "side": model_side,
-                    "mirror_side": "short" if model_side == "long" else "long",
-                    "symbols": [str(r.get("symbol")) for r in picks[:need]],
-                    "reason": reason,
-                })
-
-        # Bad model 1: chase the hottest side immediately, without HOLD.
-        if max(long_n, short_n) >= need:
-            add("BAD_NO_HOLD", side, "bad_no_hold", "majority side without hold")
-            add("BAD_TOP_CHASER", side, "bad_top_chaser", "hottest movers on majority side")
-
-        # Bad model 2: late momentum only when a side is already very crowded.
-        active = max(1, int(summary.get("active") or 1))
-        if max(long_n, short_n) / active >= 0.45:
-            add("BAD_LATE_MOMENTUM", side, "bad_late_momentum", "crowded momentum chase")
-
-        # Bad model 3: take the weak/opposite side while market has a majority.
-        if min(long_n, short_n) >= need and abs(long_n - short_n) >= 5:
-            add("BAD_WEAK_SIDE", opposite, "bad_top_chaser", "weak side against majority")
-
-        # Bad model 4: bottom-catch the weakest coins that technically vote in the majority side.
-        if max(long_n, short_n) >= need:
-            add("BAD_BOTTOM_CATCHER", side, "bad_bottom_catcher", "weakest confirmed movers on majority side")
-
-        # Bad model 5: TOP10 leader chase. If TOP10 is decisive, blindly chase it.
-        lead_long = int(leader_summary.get("long") or 0)
-        lead_short = int(leader_summary.get("short") or 0)
-        if max(lead_long, lead_short) >= 7:
-            lead_side = "long" if lead_long >= lead_short else "short"
-            add("BAD_TOP10_CHASER", lead_side, "bad_top_chaser", "blind TOP10 chase")
-        return signals
-
-    def _mirror_find_exit_index(self, start_i: int, horizon_sec: float) -> int | None:
-        snaps = self.mirror_lab_snapshots
-        if start_i >= len(snaps) - 1:
-            return None
-        target = float(snaps[start_i].get("ts") or 0.0) + horizon_sec
-        for j in range(start_i + 1, len(snaps)):
-            if float(snaps[j].get("ts") or 0.0) >= target:
-                return j
-        return None
-
-    def _mirror_virtual_pnl(self, entry: dict[str, Any], exit_snap: dict[str, Any], side: str, symbols: list[str], notional: float, fee_bps: float) -> float | None:
-        exit_rows = self._mirror_rows_by_symbol(exit_snap)
-        total = 0.0
-        fee_cost = max(0.0, fee_bps) / 10000.0 * notional * 2.0 * len(symbols)
-        for sym in symbols:
-            er = next((r for r in entry.get("rows", []) if r.get("symbol") == sym), None)
-            xr = exit_rows.get(sym)
-            if not er or not xr:
-                return None
-            entry_bid = float(er.get("bid") or 0.0)
-            entry_ask = float(er.get("ask") or 0.0)
-            exit_bid = float(xr.get("bid") or 0.0)
-            exit_ask = float(xr.get("ask") or 0.0)
-            if min(entry_bid, entry_ask, exit_bid, exit_ask) <= 0:
-                return None
-            if side == "long":
-                total += ((exit_bid - entry_ask) / entry_ask) * notional
-            else:
-                total += ((entry_bid - exit_ask) / entry_bid) * notional
-        return total - fee_cost
-
-    def mirror_lab_report_text(self) -> str:
-        """Run an accelerated virtual replay over recorded scan snapshots."""
-        s = self._settings()
-        enabled = bool(s.get("mirror_lab_enabled", False))
-        snaps = list(self.mirror_lab_snapshots or [])
-        min_snaps = max(2, int(s.get("mirror_lab_min_snapshots") or 20))
-        horizon = max(5.0, float(s.get("mirror_lab_horizon_sec") or 60.0))
-        notional = max(1.0, float(s.get("mirror_lab_virtual_notional_usdt") or 10.0))
-        fee_bps = max(0.0, float(s.get("mirror_lab_virtual_fee_bps") or 0.0))
-        if len(snaps) < min_snaps:
-            return (
-                f"🪞 Mirror Lab {s.get('bot_version', 'v0064')}\n"
-                f"Mode: {'ON' if enabled else 'OFF'}\n\n"
-                f"Нужно накопить снимки: {len(snaps)}/{min_snaps}.\n"
-                f"Команда: /mirror_test start — включить сбор виртуальных снимков.\n"
-                f"Это не торгует реальными деньгами."
-            )
-        stats: dict[str, dict[str, Any]] = {}
-        events: list[dict[str, Any]] = []
-        for i, snap in enumerate(snaps):
-            exit_i = self._mirror_find_exit_index(i, horizon)
-            if exit_i is None:
-                continue
-            exit_snap = snaps[exit_i]
-            for sig in self._mirror_bad_signals(snap, s):
-                model = str(sig.get("model"))
-                symbols = list(sig.get("symbols") or [])
-                original_side = str(sig.get("side"))
-                mirror_side = str(sig.get("mirror_side"))
-                orig_pnl = self._mirror_virtual_pnl(snap, exit_snap, original_side, symbols, notional, fee_bps)
-                mir_pnl = self._mirror_virtual_pnl(snap, exit_snap, mirror_side, symbols, notional, fee_bps)
-                if orig_pnl is None or mir_pnl is None:
-                    continue
-                st = stats.setdefault(model, {"n": 0, "orig": 0.0, "mir": 0.0, "mir_wins": 0, "orig_wins": 0, "mir_gain": 0.0, "mir_loss": 0.0})
-                st["n"] += 1
-                st["orig"] += orig_pnl
-                st["mir"] += mir_pnl
-                st["mir_wins"] += 1 if mir_pnl > 0 else 0
-                st["orig_wins"] += 1 if orig_pnl > 0 else 0
-                if mir_pnl > 0:
-                    st["mir_gain"] += mir_pnl
-                else:
-                    st["mir_loss"] += abs(mir_pnl)
-                if len(events) < 25:
-                    events.append({
-                        "ts": snap.get("ts"),
-                        "model": model,
-                        "original_side": original_side,
-                        "mirror_side": mirror_side,
-                        "symbols": symbols,
-                        "original_pnl": round(orig_pnl, 6),
-                        "mirror_pnl": round(mir_pnl, 6),
-                    })
-        ranked = []
-        for model, st in stats.items():
-            n = max(1, int(st["n"]))
-            pf = (float(st["mir_gain"]) / float(st["mir_loss"])) if float(st["mir_loss"]) > 0 else (999.0 if float(st["mir_gain"]) > 0 else 0.0)
-            ranked.append((float(st["mir"]), model, st, pf, float(st["mir_wins"]) / n, float(st["orig_wins"]) / n))
-        ranked.sort(reverse=True, key=lambda x: x[0])
-        self.mirror_lab_last_report = {"ts": time.time(), "stats": stats, "events": events, "horizon": horizon, "notional": notional}
-        try:
-            self.mirror_lab_log_path.parent.mkdir(parents=True, exist_ok=True)
-            with self.mirror_lab_log_path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(self.mirror_lab_last_report, ensure_ascii=False, default=str) + "\n")
-        except Exception:
-            pass
-        lines = [
-            f"🪞 Mirror Lab {s.get('bot_version', 'v0064')}",
-            f"Mode: {'ON' if enabled else 'OFF'} | snapshots {len(snaps)} | horizon {horizon:.0f}s",
-            f"Virtual size: {notional:.2f} USDT/slot | fee {fee_bps:.2f} bps",
-            "",
-            "РЕЗУЛЬТАТ ORIGINAL vs MIRROR",
-        ]
-        if not ranked:
-            lines.append("Пока нет завершённых виртуальных корзин. Подожди ещё 1–2 минуты или увеличь время сбора.")
-            return "\n".join(lines)
-        for mir_total, model, st, pf, mir_wr, orig_wr in ranked[:6]:
-            n = int(st["n"])
-            lines.append(
-                f"{model}: n={n} | original {float(st['orig']):+.4f} | mirror {float(st['mir']):+.4f} | "
-                f"mirror WR {mir_wr*100:.0f}% | PF {pf:.2f}"
-            )
-        best = ranked[0]
-        need_live = int(s.get("mirror_lab_min_signals_for_live") or 50)
-        best_n = int(best[2]["n"])
-        verdict = "недостаточно статистики"
-        if best_n >= need_live and best[0] > 0 and best[3] >= 1.2 and best[4] >= 0.55:
-            verdict = "mirror edge найден, можно рассматривать ASSIST, но не автолайв без ручного подтверждения"
-        elif best[0] > 0:
-            verdict = f"зеркало пока лучше, но нужно минимум {need_live} сигналов; сейчас {best_n}"
-        lines.extend([
-            "",
-            f"ЛУЧШИЙ: {best[1]} mirror {best[0]:+.4f}",
-            f"Вердикт: {verdict}",
-            "",
-            "Команды: /mirror_test start | stop | report | clear",
-        ])
-        return "\n".join(lines)[:3900]
-
     def _detect_wave_signal(self, rows: list[dict[str, Any]], s: dict[str, Any]) -> tuple[str | None, list[dict[str, Any]], dict[str, Any]]:
-        """Detect v0064 Price Tsunami from the selected market signal source.
+        """Detect v0069 Price Tsunami from the selected market signal source.
 
         ALL mode:
         - Normal Wave: dominance >= 75%.
@@ -2494,7 +2178,7 @@ class MicroMakerEngine:
             normal_count_need = max(1, int(s.get("wave_top10_normal_count") or 7))
             tsunami_count_need = max(normal_count_need, int(s.get("wave_top10_tsunami_count") or 8))
             accel_count_need = max(0, int(s.get("wave_top10_accel_count") or 2))
-            # v0064: TOP10 is mapped to the ALL-zero logic:
+            # v0069: TOP10 is mapped to the ALL-zero logic:
             # - 7/10 current direction = NORMAL, same as broad dominance.
             # - 7/10 + growth of +2 leaders over 60s = EARLY, same as +15p.p. acceleration.
             # - 8/10 current direction = TSUNAMI, because this is a very strong leader consensus.
@@ -2521,12 +2205,12 @@ class MicroMakerEngine:
 
         vote_summary = signal_summary
 
-        # v0064 HOLD rule: +15p.p. must be stable, not a one-scan spike.
+        # v0069 HOLD rule: +15p.p. must be stable, not a one-scan spike.
         # Default rule: 4 of the last 5 sampled checks over about 10 seconds.
         # This is stronger than the old 3/3s hold and tolerant to one noisy failed check.
         hold_checks = max(1, int(s.get("wave_signal_hold_checks") or 5))
         hold_required = max(1, min(hold_checks, int(s.get("wave_signal_hold_required") or max(1, hold_checks - 1))))
-        hold_sec = max(0.0, float(s.get("wave_signal_hold_sec") or 10.0))
+        hold_sec = max(0.0, float(s.get("wave_signal_hold_sec", 10.0)))
         hold_key = f"{raw_mode}:{side}" if raw_mode != "wait" else None
         sample_key = hold_key or "wait"
         # Spread 5 hold samples across the configured hold window. The run loop is faster
@@ -2704,23 +2388,11 @@ class MicroMakerEngine:
             self.stats.last_action = f"wave cooldown: {self.wave_cooldown_until_ts - now:.0f}s"
             return
         client = await self._ensure_client()
-        # v0064: private positions check is throttled and timed out. It used to be
-        # called every loop tick and could make the scan appear frozen.
         try:
-            pos_interval = max(2.0, float(s.get("existing_positions_check_interval_sec") or 8.0))
-        except Exception:
-            pos_interval = 8.0
-        if now - self._last_existing_positions_ts >= pos_interval:
-            self._last_existing_positions_ts = now
-            try:
-                fetched = await asyncio.wait_for(client.fetch_positions(), timeout=max(4.0, float(s.get("mexc_private_timeout") or 15.0)))
-                existing = [p for p in fetched if str(p.get("symbol") or "").upper().endswith("_USDT")]
-                self._cached_existing_positions = existing
-            except Exception as e:
-                existing = list(self._cached_existing_positions or [])
-                self._log_error("wave_existing_positions_check_error", e)
-        else:
-            existing = list(self._cached_existing_positions or [])
+            existing = [p for p in await client.fetch_positions() if str(p.get("symbol") or "").upper().endswith("_USDT")]
+        except Exception as e:
+            existing = []
+            self._log_error("wave_existing_positions_check_error", e)
         if existing:
             self.stats.open_position_symbols = [str(p.get("symbol")) for p in existing if p.get("symbol")]
             self.stats.current_symbols = self.stats.open_position_symbols[: max(1, int(s.get("wave_positions") or 5))]
@@ -2812,7 +2484,7 @@ class MicroMakerEngine:
             self._remember_wave_open_skip(symbol, "no_margin", margin_note=margin_note)
             self._log_event("wave_open_no_margin", symbol=symbol, margin_note=margin_note)
             return None
-        # v0064: aggressive entry means: choose a price that already exists in
+        # v0069: aggressive entry means: choose a price that already exists in
         # the opposite side of the book and has enough cumulative liquidity for
         # this slot. We do NOT place a passive maker order and wait in queue.
         # LONG consumes asks; SHORT consumes bids. If the best level is enough,
@@ -3016,7 +2688,7 @@ class MicroMakerEngine:
         self._log_event("wave_cycle_start", side=side, symbols=symbols, target=target, leverage=s.get("leverage"), signal=signal, equity_before=equity_before)
         wave_slots = int(s.get("wave_positions") or 5)
         order_symbols = symbols[:wave_slots]
-        # v0064: the first 5 picks can become stale while the controlled burst is
+        # v0069: the first 5 picks can become stale while the controlled burst is
         # opening. If a slot is skipped because the coin flipped side, spread widened,
         # or the order did not fill, immediately top up from a fresh same-side scan
         # instead of accepting a 2/5 basket. MEXC throttle/rate-limit errors
@@ -3114,7 +2786,7 @@ class MicroMakerEngine:
             self.stats.last_action = f"PARTIAL {side.upper()} basket: opened {len(opened)}/{wave_slots}; replaced stale slots but still not full"
             self._log_event("wave_cycle_partial", filled=len(opened), target_slots=wave_slots, symbols=[p.get("symbol") for p in opened], skipped=skipped[-12:], attempts=open_attempts)
 
-        # v0064: if MEXC charged real fees despite the zero-fee universe, do not
+        # v0069: if MEXC charged real fees despite the zero-fee universe, do not
         # instantly kill the position. Instead raise the basket NET target so the
         # cycle only closes after fees + a real profit buffer are covered.
         entry_fee_sum = sum(self._position_fee_usdt(p) for p in opened)
@@ -3378,7 +3050,7 @@ class MicroMakerEngine:
         await self._manage_position(symbol, direction, pos, s, equity_before=equity_before)
 
     async def _manage_basket_position(self, symbol: str, direction: str, pos: dict[str, Any], s: dict[str, Any], equity_before: float | None = None) -> None:
-        """v0064 Wave Price Tsunami Basket manager.
+        """v0069 Wave Price Tsunami Basket manager.
 
         No per-position stop. A position is closed only with a maker close order
         when the configured positive basket target is reachable. After the task
@@ -3450,7 +3122,7 @@ class MicroMakerEngine:
             active_target_ticks = max(1, int(math.ceil(active_target_usdt / max(tick_value, 1e-12))))
             target_price = entry + active_target_ticks * tick if direction == "long" else entry - active_target_ticks * tick
 
-            # v0064 rotation: after the stale timeout, stop waiting for +$0.01.
+            # v0069 rotation: after the stale timeout, stop waiting for +$0.01.
             # The close order is downgraded to breakeven/small-profit so the slot can
             # rotate into a better coin. This is not a stop; it does not cross a loss.
             if direction == "long":
