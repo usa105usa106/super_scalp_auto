@@ -31,7 +31,7 @@ UI_BG_TASKS: dict[str, asyncio.Task] = {}
 def spawn_ui_task(coro, name: str = "ui_bg") -> asyncio.Task:
     """Run slow Telegram/API actions outside the callback handler so buttons do not stick.
 
-    v0076: one background UI task per action name. Repeated button taps must not
+    v0078: one background UI task per action name. Repeated button taps must not
     stack duplicate scans/fee checks/close-all operations in the background.
     If the same action is already running, keep it and close the unused coroutine.
     """
@@ -133,7 +133,7 @@ def signal_toggle_button() -> InlineKeyboardButton:
 def main_menu() -> InlineKeyboardMarkup:
     """Live inline panel: only trading controls plus operational tool screens.
 
-    v0076 UI rule:
+    v0078 UI rule:
     - Telegram command menu keeps only: /start, /scan, /balance, /status, /help.
     - Live panel has one ALL total/TOP10 signal toggle. Default: ALL total.
     - Tool screens (Settings/Universe/API/Doctor/Log) are sent as separate
@@ -149,6 +149,16 @@ def main_menu() -> InlineKeyboardMarkup:
     ])
 
 
+def core_bot_commands() -> list[BotCommand]:
+    return [
+        BotCommand("start", "Открыть live-панель"),
+        BotCommand("scan", "Разовый read-only Price Scan"),
+        BotCommand("balance", "Баланс USDT и позиции"),
+        BotCommand("status", "Полный статус бота"),
+        BotCommand("help", "Справка"),
+    ]
+
+
 def command_keyboard() -> ReplyKeyboardMarkup:
     """Ordinary Telegram reply keyboard, separate from inline trading buttons."""
     return ReplyKeyboardMarkup(
@@ -157,6 +167,85 @@ def command_keyboard() -> ReplyKeyboardMarkup:
         is_persistent=True,
         input_field_placeholder="Команды бота",
     )
+
+
+async def sync_telegram_command_menu(app: Application) -> None:
+    """Force-clean Telegram's native slash-command menu.
+
+    v0078: Telegram can keep old commands in more specific BotCommand scopes
+    (all-private chats or a concrete chat) even when the default command list is
+    changed. We therefore delete the old scopes first, then install exactly the
+    5 core commands. Inline buttons are not touched.
+    """
+    commands = core_bot_commands()
+    bot = app.bot
+
+    # Delete the default list first. On older stubs this method may be absent.
+    delete_cmds = getattr(bot, "delete_my_commands", None)
+    if delete_cmds is not None:
+        try:
+            await delete_cmds()
+        except TelegramError as e:
+            log_error("telegram_command_menu_delete_default_error", e)
+        except Exception as e:
+            log_error("telegram_command_menu_delete_default_unexpected", e)
+
+    # Clear common Telegram command scopes that can override the default list.
+    try:
+        import telegram as tg  # imported dynamically so offline tests can stub it
+    except Exception:
+        tg = None
+
+    scopes: list[Any] = []
+    if tg is not None:
+        for name in (
+            "BotCommandScopeAllPrivateChats",
+            "BotCommandScopeAllGroupChats",
+            "BotCommandScopeAllChatAdministrators",
+        ):
+            cls = getattr(tg, name, None)
+            if cls is not None:
+                try:
+                    scopes.append(cls())
+                except Exception:
+                    pass
+        chat_scope_cls = getattr(tg, "BotCommandScopeChat", None)
+        chat_id = int(STORE.load().get("telegram_panel_chat_id") or 0)
+        if chat_scope_cls is not None and chat_id:
+            try:
+                scopes.append(chat_scope_cls(chat_id=chat_id))
+            except Exception:
+                pass
+
+    if delete_cmds is not None:
+        for scope in scopes:
+            try:
+                await delete_cmds(scope=scope)
+            except TelegramError as e:
+                log_error("telegram_command_menu_delete_scope_error", e, scope=str(scope))
+            except Exception as e:
+                log_error("telegram_command_menu_delete_scope_unexpected", e, scope=str(scope))
+
+    # Install exactly the visible native menu: /start, /scan, /balance, /status, /help.
+    try:
+        await bot.set_my_commands(commands)
+        log_event("telegram_command_menu_synced", commands=[getattr(c, "command", str(c)) for c in commands])
+    except TelegramError as e:
+        log_error("telegram_command_menu_set_default_error", e)
+    except Exception as e:
+        log_error("telegram_command_menu_set_default_unexpected", e)
+
+    # In private/chat-specific scopes, set the same 5-command list too. This makes
+    # cleanup visible immediately even if Telegram previously had a private scope.
+    set_cmds = getattr(bot, "set_my_commands", None)
+    if set_cmds is not None:
+        for scope in scopes:
+            try:
+                await set_cmds(commands, scope=scope)
+            except TelegramError as e:
+                log_error("telegram_command_menu_set_scope_error", e, scope=str(scope))
+            except Exception as e:
+                log_error("telegram_command_menu_set_scope_unexpected", e, scope=str(scope))
 
 
 async def delete_later(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int, delay: float = 1.5) -> None:
@@ -255,7 +344,7 @@ def settings_text() -> str:
         mode_txt = "TOP10 — направление считают 10 самых сильных/ликвидных non-stable монет"
     direction = str(s.get("direction_mode") or "both").upper()
     return (
-        f"⚙️ Settings {s.get('bot_version', 'v0076')}\n\n"
+        f"⚙️ Settings {s.get('bot_version', 'v0078')}\n\n"
         "Оставил средний вариант: не простыня как раньше, но и не пусто.\n\n"
         "СИГНАЛ\n"
         f"Signal: {mode_txt}\n"
@@ -356,7 +445,7 @@ def settings_menu() -> InlineKeyboardMarkup:
 def symbols_text(engine: MicroMakerEngine | None = None) -> str:
     """Clean Symbols screen.
 
-    v0076: show what matters first: raw zero-fee count, blocked count,
+    v0078: show what matters first: raw zero-fee count, blocked count,
     ignored count, trade universe, and current scan readiness. Long explanatory
     text is removed from the main Telegram card.
     """
@@ -402,7 +491,7 @@ def symbols_text(engine: MicroMakerEngine | None = None) -> str:
     if str(s.get('wave_market_signal_mode') or 'all_zero_total') == 'top10_leaders':
         leaders_line = "TOP10 leaders: " + (", ".join(leader_symbols[:10]) if leader_symbols else "будут выбраны после scan") + "\n"
     return (
-        f"📈 Symbols / Universe {s.get('bot_version', 'v0076')}\n\n"
+        f"📈 Symbols / Universe {s.get('bot_version', 'v0078')}\n\n"
         "РЕЖИМ\n"
         f"Auto-select: {'ON' if s.get('auto_select_symbols') else 'OFF'}\n"
         f"Signal: {s.get('wave_market_signal_mode', 'all_zero_total')}\n"
@@ -523,18 +612,21 @@ def panel_text(engine: MicroMakerEngine | None = None) -> str:
     if e:
         return e.quick_status_text()
     s = STORE.load()
+    slots = int(s.get("wave_positions") or 5)
+    normal_tp = float(s.get("wave_normal_target_profit_usdt") or 0.05)
+    tsunami_tp = float(s.get("wave_tsunami_target_profit_usdt") or 0.10)
     return (
-        f"🌊 Price Tsunami {s.get('bot_version', 'v0076')}\n"
+        f"🌊 Price Tsunami {s.get('bot_version', 'v0078')}\n"
         "State: STOPPED\n\n"
         "PRICE SCAN 10s: пока нет данных.\n"
         "LONG 0% | SHORT 0% | NEUTRAL 0%\n"
         "Вывод: сидим в засаде, сделки не открываем.\n\n"
         "Правила:\n"
-        "Early: сейчас >=65% и эта же сторона выросла на +15п.п. за 60s → 5 сделок, 5x, NET +$0.05\n"
-        "Normal: сейчас >=75% стороны → 5 сделок, 5x, NET +$0.05\n"
-        "Tsunami: сейчас >=75% и эта же сторона выросла на +15п.п. за 60s → 5 сделок, 10x, NET +$0.10\n"
+        f"Early: сейчас >=65% и эта же сторона выросла на +15п.п. за 60s → {slots} сделок, 5x, NET +${normal_tp:.2f}\n"
+        f"Normal: сейчас >=75% стороны → {slots} сделок, 5x, NET +${normal_tp:.2f}\n"
+        f"Tsunami: сейчас >=75% и эта же сторона выросла на +15п.п. за 60s → {slots} сделок, 10x, NET +${tsunami_tp:.2f}\n"
         "65/75 — итог сейчас; +15п.п. уже внутри этих процентов.\n"
-        "v0076: сигнал должен держаться 4 из 5 checks за ~10s; один шумовой провал не сбрасывает сигнал.\n\n"
+        "v0078: сигнал должен держаться 4 из 5 checks за ~10s; один шумовой провал не сбрасывает сигнал.\n\n"
         "Stop = пауза, позиции/ордера не трогает. Close All = снести всё.\n"
         "Нажми ▶️ Start Tsunami."
     )
@@ -803,7 +895,7 @@ async def update_live_panel(app: Application, force: bool = False) -> None:
 
 
 async def live_panel_loop(app: Application) -> None:
-    """v0076 clean rollback panel loop.
+    """v0078 clean rollback panel loop.
 
     RUNNING: edit one current scan panel every 5 sec.
     Every 10 min: delete all known scan panels and send one fresh panel down.
@@ -839,14 +931,9 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not chat_id:
         return
     engine = await ensure_engine(context, chat_id)
-    await upsert_panel(
-        context,
-        chat_id,
-        panel_text(engine),
-        main_menu(),
-        mode="main",
-        recreate=True,
-    )
+    # /start should give one clean live panel, not leave duplicate old panels above.
+    await delete_all_panels(context.application)
+    await send_fresh_panel(context, chat_id, panel_text(engine), main_menu(), mode="main")
 
 
 async def panel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -949,7 +1036,8 @@ async def preset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     engine = await ensure_engine(context, chat_id)
     reset_engine_signal_state(engine)
     engine.clear_ignored_symbols()
-    await reply_tool_message(context, chat_id, "🌊 Price Tsunami v0076 применён: 10s price-scan, итоговые 65/75% + рост 15п.п., 5 LONG/SHORT, 5x/10x, REAL NET выход.\n\n" + settings_text(), settings_menu())
+    slots = int(STORE.load().get("wave_positions") or 5)
+    await reply_tool_message(context, chat_id, f"🌊 Price Tsunami v0078 применён: 10s price-scan, итоговые 65/75% + рост 15п.п., {slots} LONG/SHORT, 5x/10x, REAL NET выход.\n\n" + settings_text(), settings_menu())
 
 
 async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1216,7 +1304,7 @@ async def send_log_full_document(context: ContextTypes.DEFAULT_TYPE, chat_id: in
         await context.bot.send_message(chat_id=chat_id, text=f"📄 /log_full {STORE.load().get('bot_version')}: собираю и отправляю TXT-файл...")
         log_event("log_full_export_requested", chat_id=chat_id)
         path = export_full_log(STORE.load(), engine or ENGINE)
-        caption = f"📄 Full debug log {STORE.load().get('bot_version', 'v0076')}"
+        caption = f"📄 Full debug log {STORE.load().get('bot_version', 'v0078')}"
         with open(path, "rb") as f:
             await asyncio.wait_for(context.bot.send_document(
                 chat_id=chat_id,
@@ -1346,21 +1434,21 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await install_command_keyboard(context, chat_id)
     s = STORE.load()
     txt = (
-        f"🆘 Price Tsunami Help — {s.get('bot_version', 'v0076')}\n\n"
+        f"🆘 Price Tsunami Help — {s.get('bot_version', 'v0078')}\n\n"
         "Логика торговли:\n"
         "1) Бот держит ALL active zero-fee *_USDT universe, без лимита 250.\n"
         "2) Каждые ~10 секунд сравнивает mid-price каждой монеты.\n"
         "3) Считает рынок: LONG %, SHORT %, NEUTRAL %. Проценты от всего universe; если по монете нет свежей цены/истории — она считается NEUTRAL, а не пропадает из знаменателя.\n"
         "4) Если перевес слабый — ничего не открывает.\n\n"
         "Режимы входа:\n"
-        "Early Wave: сейчас >=65% одной стороны и эта же сторона выросла на +15п.п. за 60s → 5 сделок, 5x, REAL NET TP +$0.05.\n"
-        "Normal Wave: сейчас >=75% одной стороны → 5 сделок, 5x, REAL NET TP +$0.05.\n"
-        "Tsunami: сейчас >=75% и эта же сторона выросла на +15п.п. за 60s → 5 сделок, 10x, REAL NET TP +$0.10.\n"
+        "Early Wave: >=65% одной стороны и рост +15п.п. за 60s → Basket 3/5 по настройке, 5x, обычный NET TP.\n"
+        "Normal Wave: >=75% одной стороны → Basket 3/5 по настройке, 5x, обычный NET TP.\n"
+        "Tsunami: >=75% и рост +15п.п. за 60s → Basket 3/5 по настройке, 10x, tsunami NET TP.\n"
         "TOP10: 7/10 = NORMAL, 7/10 + рост +2 монеты за 60с = EARLY, 8/10 = TSUNAMI. Входы всё равно из полного zero-fee universe.\n"
         "Важно: 65% и 75% — текущий итоговый процент; +15п.п. уже внутри этого значения, это не 65+15.\n"
-        "v0076 HOLD: вход только когда сигнал подтверждён 4 из 5 checks за ~10s; один шумовой провал не сбрасывает сигнал.\n\n"
+        "v0078 HOLD: вход только когда сигнал подтверждён 4 из 5 checks за ~10s; один шумовой провал не сбрасывает сигнал.\n\n"
         "Выбор монет: не самый перегретый топ, а середина 25-60% same-side candidates.\n"
-        "Все сделки открываются одной стороной: либо 5 LONG, либо 5 SHORT. Если MEXC режет быстрые заявки, бот ждёт и повторяет те же слоты, затем добирает заменами.\n"
+        "Все сделки открываются одной стороной: либо вся корзина LONG, либо вся корзина SHORT. Если MEXC режет быстрые заявки, бот ждёт и повторяет те же слоты, затем добирает заменами.\n"
         "Закрытие: вся корзина по REAL NET equity PnL. Через 10 минут закрывает только ноль/микроплюс; минус не режет, ждёт восстановления.\n\n"
         "Кнопки live-панели:\n"
         "▶️ Start Tsunami — запустить торговый режим.\n"
@@ -1384,7 +1472,7 @@ async def _finish_panel_task(
 ) -> None:
     """Execute a slow action and refresh panel afterwards. Used so button callbacks answer instantly.
 
-    v0076: detail screens such as Price Scan should not append the live panel
+    v0078: detail screens such as Price Scan should not append the live panel
     underneath. Slow background actions are deduped and wrapped in a timeout so
     repeated button taps cannot leave endless pending UI tasks.
     """
@@ -1457,8 +1545,9 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     if data == "mm:start":
         if chat_id:
-            # Start creates/sends the current live scan panel. Tool messages are never registered as panel.
-            await send_fresh_panel(context, chat_id, "▶️ Start принят, запускаю цикл...\n\n" + panel_text(engine), main_menu(), mode="main")
+            # Start must reuse the stored live panel. Sending a fresh message here
+            # creates duplicate auto-refresh panels when the button is tapped repeatedly.
+            await upsert_panel(context, chat_id, "▶️ Start принят, запускаю цикл...\n\n" + panel_text(engine), main_menu(), mode="main")
 
             async def _start_and_refresh():
                 try:
@@ -1634,7 +1723,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     if chat_id:
-        await context.bot.send_message(chat_id=chat_id, text="ℹ️ Эта старая кнопка больше не используется в v0076. Нажми /start для новой live-панели.")
+        await context.bot.send_message(chat_id=chat_id, text="ℹ️ Эта старая кнопка больше не используется в v0078. Нажми /start для новой live-панели.")
 
 
 async def runtime_watchdog_loop(app: Application) -> None:
@@ -1677,16 +1766,7 @@ async def post_init(app: Application) -> None:
     global ENGINE, PANEL_UPDATE_TASK, RUNTIME_WATCHDOG_TASK
     log_event("telegram_post_init", version=STORE.load().get("bot_version"))
     ENGINE = MicroMakerEngine(STORE)
-    try:
-        await app.bot.set_my_commands([
-            BotCommand("start", "Открыть live-панель"),
-            BotCommand("scan", "Разовый read-only Price Scan"),
-            BotCommand("balance", "Баланс USDT и позиции"),
-            BotCommand("status", "Полный статус бота"),
-            BotCommand("help", "Справка"),
-        ])
-    except TelegramError:
-        pass
+    await sync_telegram_command_menu(app)
     PANEL_UPDATE_TASK = asyncio.create_task(live_panel_loop(app), name="telegram_live_panel_loop")
     RUNTIME_WATCHDOG_TASK = asyncio.create_task(runtime_watchdog_loop(app), name="runtime_watchdog_loop")
 

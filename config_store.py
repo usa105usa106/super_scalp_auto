@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 DEFAULTS: dict[str, Any] = {
-    "bot_version": "v0076",
+    "bot_version": "v0078",
 
     # secrets are set from Telegram with /api set KEY SECRET. Telegram token stays in ENV.
     "mexc_api_key": "",
@@ -105,7 +105,7 @@ DEFAULTS: dict[str, Any] = {
     "max_entry_maker_fee_rate": 0.0,
     "max_entry_taker_fee_rate": 0.0,
     "fee_guard_ignore_symbol": True,
-    "trade_profile": "wave_price_tsunami_v0076",
+    "trade_profile": "wave_price_tsunami_v0078",
     "edge_filter_enabled": False,
     "entry_top_imbalance_ratio": 1.15,
     "entry_microprice_min_ticks": 0.10,
@@ -162,7 +162,7 @@ DEFAULTS: dict[str, Any] = {
     "wave_close_mode": "market",
     "wave_entry_post_only": False,
     "wave_entry_order_lifetime_ms": 450,
-    # v0076: aggressive entry must not wait in queue. Pick an existing book
+    # v0078: aggressive entry must not wait in queue. Pick an existing book
     # level with enough cumulative liquidity, place a normal LIMIT there,
     # wait briefly, then cancel leftovers.
     "wave_entry_book_sweep_levels": 5,
@@ -186,11 +186,11 @@ DEFAULTS: dict[str, Any] = {
     "wave_fill_topup_rounds": 5,
     "wave_open_max_attempts_multiplier": 5.0,
 
-    # v0076 Price Tsunami mode: global 10s price vote, clean early/normal/tsunami rules.
+    # v0078 Price Tsunami mode: global 10s price vote, clean early/normal/tsunami rules.
     # Count how many ALL active zero-fee coins rose/fell over 10 seconds, then use 60-second
     # dominance growth to catch an early market wave.
     "wave_price_vote_enabled": True,
-    # v0076: market signal mode switch. all_zero_total keeps the current
+    # v0078: market signal mode switch. all_zero_total keeps the current
     # full zero-fee universe vote. top10_leaders uses the 10 most liquid
     # non-stable zero-fee USDT leaders for direction; trade entries still
     # use the full zero-fee universe. TOP10 rules: 7/10 NORMAL,
@@ -206,7 +206,7 @@ DEFAULTS: dict[str, Any] = {
     "wave_price_min_move_pct": 0.015,
     "wave_accel_lookback_sec": 60.0,
     "wave_accel_trigger_pct": 15.0,
-    # v0076: signal must HOLD, not just flash for one scan tick.
+    # v0078: signal must HOLD, not just flash for one scan tick.
     # Example: Early requires current side >=65% AND +15p.p. growth.
     # Stable entry requires 4 of last 5 hold samples over about 10 seconds.
     "wave_signal_hold_checks": 5,
@@ -267,7 +267,7 @@ DEFAULTS: dict[str, Any] = {
     "telegram_panel_chat_id": 0,
     "telegram_panel_message_id": 0,
     "telegram_panel_mode": "main",  # main | settings | symbols | api
-    # v0076 clean panel lifecycle: edit one panel every 5s, rotate once per 10m.
+    # v0078 clean panel lifecycle: edit one panel every 5s, rotate once per 10m.
     "telegram_panel_message_ids": [],
     "telegram_panel_created_ts": 0.0,
     "telegram_panel_cycle_sec": 600.0,
@@ -330,7 +330,7 @@ WAVE_HUNTER_PROFILE_V0032: dict[str, Any] = {
     "max_entry_maker_fee_rate": 0.0,
     "max_entry_taker_fee_rate": 0.0,
     "fee_guard_ignore_symbol": True,
-    "trade_profile": "wave_price_tsunami_v0076",
+    "trade_profile": "wave_price_tsunami_v0078",
     "edge_filter_enabled": False,
     "entry_top_imbalance_ratio": 1.15,
     "entry_microprice_min_ticks": 0.10,
@@ -384,7 +384,7 @@ WAVE_HUNTER_PROFILE_V0032: dict[str, Any] = {
     "wave_close_mode": "market",
     "wave_entry_post_only": False,
     "wave_entry_order_lifetime_ms": 450,
-    # v0076: aggressive entry must not wait in queue. Pick an existing book
+    # v0078: aggressive entry must not wait in queue. Pick an existing book
     # level with enough cumulative liquidity, place a normal LIMIT there,
     # wait briefly, then cancel leftovers.
     "wave_entry_book_sweep_levels": 5,
@@ -408,11 +408,11 @@ WAVE_HUNTER_PROFILE_V0032: dict[str, Any] = {
     "wave_fill_topup_rounds": 5,
     "wave_open_max_attempts_multiplier": 5.0,
 
-    # v0076 Price Tsunami mode: global 10s price vote, clean early/normal/tsunami rules.
+    # v0078 Price Tsunami mode: global 10s price vote, clean early/normal/tsunami rules.
     # Count how many ALL active zero-fee coins rose/fell over 10 seconds, then use 60-second
     # dominance growth to catch an early market wave.
     "wave_price_vote_enabled": True,
-    # v0076: market signal mode switch. all_zero_total keeps the current
+    # v0078: market signal mode switch. all_zero_total keeps the current
     # full zero-fee universe vote. top10_leaders uses the 10 most liquid
     # non-stable zero-fee USDT leaders for direction; trade entries still
     # use the full zero-fee universe. TOP10 rules: 7/10 NORMAL,
@@ -428,7 +428,7 @@ WAVE_HUNTER_PROFILE_V0032: dict[str, Any] = {
     "wave_price_min_move_pct": 0.015,
     "wave_accel_lookback_sec": 60.0,
     "wave_accel_trigger_pct": 15.0,
-    # v0076: signal must HOLD, not just flash for one scan tick.
+    # v0078: signal must HOLD, not just flash for one scan tick.
     # Example: Early requires current side >=65% AND +15p.p. growth.
     # Stable entry requires 4 of last 5 hold samples over about 10 seconds.
     "wave_signal_hold_checks": 5,
@@ -533,23 +533,34 @@ class ConfigStore:
         except Exception:
             pass
 
-        # v0076 rollback safety: never inherit broken mirror-era Telegram behavior from old settings.
+        # v0078 rollback safety: never inherit broken mirror-era Telegram behavior from old settings.
+        # Do not reset valid user-facing UI settings on every load: Settings has Panel 5s/10s
+        # buttons, so telegram_live_update_sec must persist after the user taps them.
         out["telegram_delete_command_messages"] = False
         out["telegram_reply_keyboard"] = False
         out["telegram_reply_keyboard_delete_hint"] = False
-        out["telegram_live_update_sec"] = 5.0
-        out["telegram_live_fast_update_sec"] = 5.0
-        out["telegram_panel_cycle_sec"] = 600.0
+        try:
+            out["telegram_live_update_sec"] = max(2.0, float(out.get("telegram_live_update_sec") or DEFAULTS["telegram_live_update_sec"]))
+        except Exception:
+            out["telegram_live_update_sec"] = DEFAULTS["telegram_live_update_sec"]
+        try:
+            out["telegram_live_fast_update_sec"] = max(2.0, float(out.get("telegram_live_fast_update_sec") or DEFAULTS["telegram_live_fast_update_sec"]))
+        except Exception:
+            out["telegram_live_fast_update_sec"] = DEFAULTS["telegram_live_fast_update_sec"]
+        try:
+            out["telegram_panel_cycle_sec"] = max(60.0, float(out.get("telegram_panel_cycle_sec") or DEFAULTS["telegram_panel_cycle_sec"]))
+        except Exception:
+            out["telegram_panel_cycle_sec"] = DEFAULTS["telegram_panel_cycle_sec"]
         out["telegram_panel_refresh_mode"] = "edit_rotate"
         out["stop_on_api_errors"] = 999
-        # v0076 UI default: the live toggle starts from ALL total after upgrade.
+        # v0078 UI default: the live toggle starts from ALL total after upgrade.
         # The user can switch to TOP10 with one tap on the live panel.
         try:
             if str(data.get("bot_version") or "") != DEFAULTS["bot_version"] and str(data.get("trade_profile") or "") != "custom":
                 out["wave_market_signal_mode"] = DEFAULTS["wave_market_signal_mode"]
         except Exception:
             out["wave_market_signal_mode"] = DEFAULTS["wave_market_signal_mode"]
-        # v0076: v0070 stored 700ms, which was too strict for 144 WS books.
+        # v0078: v0070 stored 700ms, which was too strict for 144 WS books.
         # Raise old/lower values to the safer audited default, but keep higher manual values.
         try:
             if float(out.get("ws_book_stale_ms") or 0) < float(DEFAULTS["ws_book_stale_ms"]):

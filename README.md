@@ -1,8 +1,8 @@
-# MEXC Micro Maker Bot — v0076 Audited Runtime Stable
+# MEXC Micro Maker Bot — v0078 Audited Runtime Stable
 
 Clean rollback branch based on v0069, with no Mirror Lab / no reverse-bot code.
 
-## Fixes in v0076
+## Fixes in v0078
 
 - ALL and TOP10 signal modes preserved:
   - `all_zero_total`
@@ -32,7 +32,7 @@ Clean rollback branch based on v0069, with no Mirror Lab / no reverse-bot code.
 - `/log_full` sends TXT export.
 - `/log_tail` remains available manually but is hidden from the Telegram command menu.
 
-- Telegram UI cleanup v0076:
+- Telegram UI cleanup v0078:
   - Telegram command menu is reduced to `/start`, `/scan`, `/balance`, `/status`, `/help`.
   - live inline panel keeps trading actions, Price Scan, service tools, and one ALL total/TOP10 signal toggle.
   - default signal mode is `all_zero_total`; one tap switches the live button to TOP10, another tap returns to ALL total.
@@ -55,16 +55,16 @@ python tests/callback_audit.py
 Expected:
 
 ```text
-NO_MIRROR_TEST_OK v0076
-TOP10_FIRE_TEST_OK v0076
-PANEL_LIFECYCLE_TEST_OK v0076
-PRIVATE_THROTTLE_TEST_OK v0076
-ACTIVE_MANAGE_THROTTLE_TEST_OK v0076
-LOOP_TIMEOUT_TEST_OK v0076
-CALLBACK_AUDIT_OK ... v0076
+NO_MIRROR_TEST_OK v0078
+TOP10_FIRE_TEST_OK v0078
+PANEL_LIFECYCLE_TEST_OK v0078
+PRIVATE_THROTTLE_TEST_OK v0078
+ACTIVE_MANAGE_THROTTLE_TEST_OK v0078
+LOOP_TIMEOUT_TEST_OK v0078
+CALLBACK_AUDIT_OK ... v0078
 ```
 
-## UI cleanup v0076
+## UI cleanup v0078
 
 Telegram bot command menu contains only:
 
@@ -96,7 +96,7 @@ When switched:
 Balance/status/help are not duplicated in the inline panel. Service tools stay as inline buttons, not bot-menu commands, and open in separate messages.
 
 
-## Settings screen v0076
+## Settings screen v0078
 
 Inline Settings now contains a medium set of useful controls:
 
