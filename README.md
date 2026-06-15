@@ -1,75 +1,116 @@
-# MEXC Micro Maker Bot — v0069 Clean Rollback Stable
+# MEXC Micro Maker Bot — v0076 Audited Runtime Stable
 
-v0069 is a clean rollback from the last pre-Mirror stable branch. Mirror Lab / reverse bot code is removed completely.
+Clean rollback branch based on v0069, with no Mirror Lab / no reverse-bot code.
 
-## Main point
+## Fixes in v0076
 
-This build restores the original Price Tsunami logic and fixes only runtime/panel behavior:
+- ALL and TOP10 signal modes preserved:
+  - `all_zero_total`
+  - `top10_leaders`
+- TOP10 rules preserved:
+  - 7/10 = NORMAL
+  - 7/10 + +2 leaders over 60s = EARLY
+  - 8/10 = TSUNAMI
+  - entries are still picked from the full zero-fee universe.
+- Runtime scan tick watchdog:
+  - one stuck scan/API tick cannot freeze the whole strategy loop.
+  - default `runtime_loop_tick_timeout_sec = 22`.
+- Private API throttling:
+  - balance check no longer runs every 100ms loop tick.
+  - open positions check no longer runs every 100ms loop tick.
+  - active basket management now checks all open positions through one cached snapshot instead of per-symbol polling.
+  - active basket equity snapshot is cached briefly, so `account/assets` is not requested every 450ms manage tick.
+  - position margin balance read is cached briefly.
+- WS freshness relaxed for the full 144-symbol universe:
+  - default `ws_book_stale_ms = 1200` instead of `700`.
+  - older stored values below 1200 are lifted to 1200 on load.
+- Doctor command now shows loop tick count, heartbeat age, last tick ms, timeout count.
+- Panel lifecycle preserved:
+  - Start sends one fresh panel down.
+  - Running edits that panel every 5 seconds.
+  - Every 10 minutes old known panels are deleted and one fresh panel is sent down.
+- `/log_full` sends TXT export.
+- `/log_tail` remains available manually but is hidden from the Telegram command menu.
 
-- no Mirror Lab
-- no virtual bad-bot collector
-- no command-deletion spam
-- `/log_full` sends a real `.txt` file by default
-- `/log_tail` sends recent log lines as text
-- `/scan` is read-only and answers separately
-- Fees button uses cached status and does not run a heavy API recheck
-- Start Tsunami does not toggle into pause
-- `/start` only opens a panel; it does not start trading
-
-## Panel lifecycle
-
-Required behavior:
-
-1. Start Tsunami sends one fresh scan panel down.
-2. While running, the same panel is edited every 5 seconds.
-3. The panel is not deleted every 5 seconds.
-4. After 10 minutes, all known scan panels are deleted and one fresh panel is sent down.
-5. The new panel is edited every 5 seconds for the next 10 minutes.
-
-Settings:
-
-```text
-telegram_live_update_sec = 5
-telegram_live_fast_update_sec = 5
-telegram_panel_cycle_sec = 600
-telegram_panel_refresh_mode = edit_rotate
-telegram_delete_command_messages = false
-telegram_reply_keyboard = false
-```
-
-## Diagnostics
-
-Commands:
-
-```text
-/ping
-/doctor
-/log_full
-/log_tail
-/scan
-/fees
-```
+- Telegram UI cleanup v0076:
+  - Telegram command menu is reduced to `/start`, `/scan`, `/balance`, `/status`, `/help`.
+  - live inline panel keeps trading actions, Price Scan, service tools, and one ALL total/TOP10 signal toggle.
+  - default signal mode is `all_zero_total`; one tap switches the live button to TOP10, another tap returns to ALL total.
+  - Settings screen is balanced: size, basket, direction, targets, signal thresholds, hold and panel refresh are visible as buttons; rare advanced commands `/set`, `/symbols`, `/market_mode` still work manually.
+  - Settings / Universe / API / Doctor / Log Full are sent as separate messages, so the 5s live scan refresh cannot overwrite them.
 
 ## Tests run
 
-```text
+```bash
 python -m py_compile *.py tests/*.py
-python tests/panel_lifecycle_test.py
-python tests/top10_fire_test.py
 python tests/no_mirror_test.py
+python tests/top10_fire_test.py
+python tests/panel_lifecycle_test.py
+python tests/private_throttle_test.py
+python tests/active_manage_throttle_test.py
+python tests/loop_timeout_test.py
+python tests/callback_audit.py
 ```
 
 Expected:
 
 ```text
-PANEL_LIFECYCLE_TEST_OK v0069
-TOP10_FIRE_TEST_OK v0069
-NO_MIRROR_TEST_OK v0069
+NO_MIRROR_TEST_OK v0076
+TOP10_FIRE_TEST_OK v0076
+PANEL_LIFECYCLE_TEST_OK v0076
+PRIVATE_THROTTLE_TEST_OK v0076
+ACTIVE_MANAGE_THROTTLE_TEST_OK v0076
+LOOP_TIMEOUT_TEST_OK v0076
+CALLBACK_AUDIT_OK ... v0076
 ```
 
-## Version
+## UI cleanup v0076
+
+Telegram bot command menu contains only:
 
 ```text
-bot_version = v0069
-trade_profile = wave_price_tsunami_v0069
+/start
+/scan
+/balance
+/status
+/help
+```
+
+Live inline panel contains:
+
+```text
+▶️ Start Tsunami | ⏸ Stop/Pause
+❌ Close All     | 🔍 Price Scan
+✅ Signal: ALL total   # tap -> TOP10
+📄 Log Full      | 🩺 Doctor
+⚙️ Settings      | 📈 Universe
+🔑 API
+```
+
+When switched:
+
+```text
+✅ Signal: TOP10       # tap -> ALL total
+```
+
+Balance/status/help are not duplicated in the inline panel. Service tools stay as inline buttons, not bot-menu commands, and open in separate messages.
+
+
+## Settings screen v0076
+
+Inline Settings now contains a medium set of useful controls:
+
+```text
+Signal ALL/TOP10
+Dir BOTH / LONG / SHORT
+Size 10 / 15 / 20%
+Basket 3 / 5
+NET +$0.03 / +$0.05
+Tsunami +$0.10 / +$0.15
+Early 60 / 65%
+Normal 70 / 75%
+Accel 10 / 15 p.p.
+Hold 3/5 / 4/5
+Panel 5s / 10s
+Back to Live
 ```

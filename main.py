@@ -31,7 +31,7 @@ UI_BG_TASKS: dict[str, asyncio.Task] = {}
 def spawn_ui_task(coro, name: str = "ui_bg") -> asyncio.Task:
     """Run slow Telegram/API actions outside the callback handler so buttons do not stick.
 
-    v0069: one background UI task per action name. Repeated button taps must not
+    v0076: one background UI task per action name. Repeated button taps must not
     stack duplicate scans/fee checks/close-all operations in the background.
     If the same action is already running, keep it and close the unused coroutine.
     """
@@ -117,21 +117,42 @@ def b(text: str, data: str) -> InlineKeyboardButton:
     return InlineKeyboardButton(text, callback_data=data)
 
 
+def signal_toggle_button() -> InlineKeyboardButton:
+    """One live-panel toggle for market signal source.
+
+    Default is ALL total. Pressing the button flips to TOP10 leaders, and pressing
+    again returns to ALL total. Trade entries still use the full zero-fee universe.
+    """
+    s = STORE.load()
+    mode = str(s.get("wave_market_signal_mode") or "all_zero_total")
+    if mode == "top10_leaders":
+        return b("✅ Signal: TOP10", "set:wave_market_signal_mode:all_zero_total")
+    return b("✅ Signal: ALL total", "set:wave_market_signal_mode:top10_leaders")
+
+
 def main_menu() -> InlineKeyboardMarkup:
+    """Live inline panel: only trading controls plus operational tool screens.
+
+    v0076 UI rule:
+    - Telegram command menu keeps only: /start, /scan, /balance, /status, /help.
+    - Live panel has one ALL total/TOP10 signal toggle. Default: ALL total.
+    - Tool screens (Settings/Universe/API/Doctor/Log) are sent as separate
+      messages and are not overwritten by the 5s live scan panel refresh.
+    """
     return InlineKeyboardMarkup([
         [b("▶️ Start Tsunami", "mm:start"), b("⏸ Stop/Pause", "mm:stop")],
-        [b("❌ Close All", "mm:close_all"), b("📒 Trades", "mm:trades")],
-        [b("📊 Panel", "menu:main"), b("🔍 Price Scan", "mm:scan")],
-        [b("⚙️ Settings", "menu:settings"), b("📈 Symbols", "menu:symbols")],
-        [b("🔑 API", "menu:api"), b("🧾 Fees", "mm:fees")],
+        [b("❌ Close All", "mm:close_all"), b("🔍 Price Scan", "mm:scan")],
+        [signal_toggle_button()],
+        [b("📄 Log Full", "mm:log_full"), b("🩺 Doctor", "mm:doctor")],
+        [b("⚙️ Settings", "menu:settings"), b("📈 Universe", "menu:symbols")],
+        [b("🔑 API", "menu:api")],
     ])
 
 
-
 def command_keyboard() -> ReplyKeyboardMarkup:
-    """Ordinary Telegram reply keyboard, separate from inline panel buttons."""
+    """Ordinary Telegram reply keyboard, separate from inline trading buttons."""
     return ReplyKeyboardMarkup(
-        [["/start", "/ping"], ["/balance", "/status"], ["/trades", "/log_full"], ["/help"]],
+        [["/start", "/scan"], ["/balance", "/status"], ["/help"]],
         resize_keyboard=True,
         is_persistent=True,
         input_field_placeholder="Команды бота",
@@ -161,7 +182,7 @@ async def install_command_keyboard(context: ContextTypes.DEFAULT_TYPE, chat_id: 
     try:
         msg = await context.bot.send_message(
             chat_id=chat_id,
-            text="⌨️ Меню команд включено: /start /ping /balance /status /trades /log_full /help",
+            text="⌨️ Меню команд включено: /start /scan /balance /status /help",
             reply_markup=command_keyboard(),
         )
         if bool(s.get("telegram_reply_keyboard_delete_hint")):
@@ -228,47 +249,106 @@ def ping_text(update: Update | None = None, started_perf: float | None = None) -
 
 def settings_text() -> str:
     s = STORE.load()
+    mode = str(s.get("wave_market_signal_mode") or "all_zero_total")
+    mode_txt = "ALL total — направление считается по всему zero-fee universe"
+    if mode == "top10_leaders":
+        mode_txt = "TOP10 — направление считают 10 самых сильных/ликвидных non-stable монет"
+    direction = str(s.get("direction_mode") or "both").upper()
     return (
-        f"⚙️ Price Tsunami Settings ({s.get('bot_version', 'v0069')})\n\n"
-        f"Signal mode: {s.get('wave_market_signal_mode', 'all_zero_total')}\n"
-        f"all_zero_total: рынок считает весь zero-fee trade universe.\n"
-        f"top10_leaders: рынок считают TOP10 ликвидных non-stable zero-fee, входы всё равно из полного zero-fee universe.\n"
-        f"Votes: price up = LONG, price down = SHORT, flat/no fresh price = NEUTRAL | lookback {s.get('wave_price_lookback_sec')}s\n"
-        f"Denominator: проценты считаются от выбранного signal universe; без свежей цены = NEUTRAL.\n"
-        f"TOP10 rules: 7/10 = NORMAL, 7/10 + рост +2 монеты за 60с = EARLY, 8/10 = TSUNAMI.\n"
-        f"Early Wave: текущие >= {float(s.get('wave_early_min_side_ratio') or 0.65):.0%} и эта же сторона выросла на +{float(s.get('wave_accel_trigger_pct') or 15):.0f}п.п. за {float(s.get('wave_accel_lookback_sec') or 60):.0f}s → 5 сделок, 5x, NET +${float(s.get('wave_normal_target_profit_usdt') or 0.05):.2f}\n"
-        f"Normal Wave: текущие >= {float(s.get('wave_min_side_ratio') or 0.75):.0%} → 5 сделок, 5x, NET +${float(s.get('wave_normal_target_profit_usdt') or 0.05):.2f}\n"
-        f"Tsunami: текущие >= {float(s.get('wave_min_side_ratio') or 0.75):.0%} и эта же сторона выросла на +{float(s.get('wave_accel_trigger_pct') or 15):.0f}п.п. → 5 сделок, 10x, NET +${float(s.get('wave_tsunami_target_profit_usdt') or 0.10):.2f}\n"
-        "Важно: 65%/75% — это текущее итоговое значение; +15п.п. уже внутри него, это не 65+15.\n"
-        f"Hold: нужно {int(s.get('wave_signal_hold_required') or 4)} из {int(s.get('wave_signal_hold_checks') or 5)} checks за ~{float(s.get('wave_signal_hold_sec') or 10.0):.0f}s, не один тик.\n\n"
-        f"Basket: {s.get('wave_positions')} slots | size {s.get('position_margin_percent')}% equity на слот | isolated\n"
-        f"Pick range: middle {float(s.get('wave_pick_start_pct') or 0.25):.0%}-{float(s.get('wave_pick_end_pct') or 0.60):.0%} of same-side candidates\n"
-        f"Open retry: 5 сделок открываются с паузой {float(s.get('wave_open_batch_gap_ms') or 0)/1000:.1f}s; при MEXC rate-limit бот ждёт {float(s.get('wave_open_retry_delay_sec') or 0):.1f}s и повторяет до {s.get('wave_open_retry_rounds')} раз, потом добирает replacement.\n"
-        f"After 10m: close only zero/microplus; if minus, wait recovery.\n"
-        f"Stop: pause only. Close All: cancel orders + close positions.\n\n"
-        "Команды: /set size 20, /set candidates 0, /set ws_symbols 0, /set panel_sec 5, /symbols clear"
+        f"⚙️ Settings {s.get('bot_version', 'v0076')}\n\n"
+        "Оставил средний вариант: не простыня как раньше, но и не пусто.\n\n"
+        "СИГНАЛ\n"
+        f"Signal: {mode_txt}\n"
+        f"Early: {float(s.get('wave_early_min_side_ratio') or 0.65) * 100:.0f}% | "
+        f"Normal: {float(s.get('wave_min_side_ratio') or 0.75) * 100:.0f}% | "
+        f"Ускорение: {float(s.get('wave_accel_trigger_pct') or 15):.0f} п.п.\n"
+        f"Hold: {int(s.get('wave_signal_hold_required') or 4)}/{int(s.get('wave_signal_hold_checks') or 5)} checks за {float(s.get('wave_signal_hold_sec') or 10):.0f}s\n\n"
+        "СДЕЛКА\n"
+        f"Direction: {direction}\n"
+        f"Size: {float(s.get('position_margin_percent') or 0):.0f}% equity на слот\n"
+        f"Basket: {int(s.get('wave_positions') or 5)} сделок\n"
+        f"Normal: {int(s.get('wave_normal_leverage') or 5)}x, REAL NET +${float(s.get('wave_normal_target_profit_usdt') or 0.05):.2f}\n"
+        f"Tsunami: {int(s.get('wave_tsunami_leverage') or 10)}x, REAL NET +${float(s.get('wave_tsunami_target_profit_usdt') or 0.10):.2f}\n\n"
+        "ТЕХНИЧЕСКОЕ\n"
+        f"Panel refresh: {float(s.get('telegram_live_update_sec') or 5):.0f}s\n"
+        f"WS stale: {int(float(s.get('ws_book_stale_ms') or 1200))} ms\n\n"
+        "Редкие/опасные настройки оставлены ручными через /set, чтобы не забивать экран."
     )
+
+
+def _check_float(current: Any, target: float, eps: float = 1e-9) -> str:
+    try:
+        return "✅ " if abs(float(current) - float(target)) <= eps else ""
+    except Exception:
+        return ""
+
+
+def _check_int(current: Any, target: int) -> str:
+    try:
+        return "✅ " if int(float(current)) == int(target) else ""
+    except Exception:
+        return ""
+
+
+def _check_str(current: Any, target: str) -> str:
+    return "✅ " if str(current or "").lower() == target.lower() else ""
+
 
 def settings_menu() -> InlineKeyboardMarkup:
     s = STORE.load()
+    mode = str(s.get("wave_market_signal_mode") or "all_zero_total")
+    mode_btn = b(
+        ("✅ Signal TOP10" if mode == "top10_leaders" else "✅ Signal ALL total"),
+        "set:wave_market_signal_mode:" + ("all_zero_total" if mode == "top10_leaders" else "top10_leaders"),
+    )
+    direction = str(s.get('direction_mode') or 'both').lower()
+    dir_both = "✅ " if direction == "both" else ""
+    dir_long = "✅ " if direction == "long" else ""
+    dir_short = "✅ " if direction == "short" else ""
     return InlineKeyboardMarkup([
-        [b(("✅ " if s.get('wave_normal_leverage') == 5 else "") + "5x normal", "set:wave_normal_leverage:5"), b(("✅ " if s.get('wave_tsunami_leverage') == 10 else "") + "10x tsunami", "set:wave_tsunami_leverage:10")],
-        [b("✅ Basket 5", "set:wave_positions:5"), b("Scan ALL", "set:max_zero_fee_scan_symbols:0"), b("WS ALL", "set:ws_depth_max_symbols:0")],
-        [b(("✅ " if s.get('wave_market_signal_mode') == 'all_zero_total' else "") + "Signal ALL", "set:wave_market_signal_mode:all_zero_total"), b(("✅ " if s.get('wave_market_signal_mode') == 'top10_leaders' else "") + "Signal TOP10", "set:wave_market_signal_mode:top10_leaders")],
-        [b("TOP10 7/10", "set:wave_top10_normal_count:7"), b("TSUNAMI 8/10", "set:wave_top10_tsunami_count:8"), b("Accel +2", "set:wave_top10_accel_count:2")],
-        [b("Early 65%", "set:wave_early_min_side_ratio:0.65"), b("Normal 75%", "set:wave_min_side_ratio:0.75"), b("Ускор. 15п.п.", "set:wave_accel_trigger_pct:15")],
-        [b("Hold 4/5", "set:wave_signal_hold_required:4"), b("Hold 5 checks", "set:wave_signal_hold_checks:5"), b("Hold 10s", "set:wave_signal_hold_sec:10")],
+        [mode_btn],
         [
-            b(("✅ " if float(s.get('position_margin_percent') or 0) == 5 else "") + "Size 5%", "set:position_margin_percent:5"),
-            b(("✅ " if float(s.get('position_margin_percent') or 0) == 10 else "") + "Size 10%", "set:position_margin_percent:10"),
-            b(("✅ " if float(s.get('position_margin_percent') or 0) == 15 else "") + "Size 15%", "set:position_margin_percent:15"),
-            b(("✅ " if float(s.get('position_margin_percent') or 0) == 20 else "") + "Size 20%", "set:position_margin_percent:20"),
+            b(dir_both + "Dir BOTH", "set:direction_mode:both"),
+            b(dir_long + "LONG", "set:direction_mode:long"),
+            b(dir_short + "SHORT", "set:direction_mode:short"),
         ],
-        [b("NET +$0.05", "set:wave_normal_target_profit_usdt:0.05"), b("Tsunami +$0.10", "set:wave_tsunami_target_profit_usdt:0.10"), b("Pick 25-60", "set:wave_pick_start_pct:0.25")],
-        [b("Panel 2s", "set:telegram_live_update_sec:2"), b("Panel 5s", "set:telegram_live_update_sec:5"), b("Panel 10s", "set:telegram_live_update_sec:10"), b("Stopped OFF", "set:telegram_live_stopped_update_sec:0")],
-        [b("Dir BOTH", "set:direction_mode:both"), b("LONG", "set:direction_mode:long"), b("SHORT", "set:direction_mode:short")],
-        [b("Emergency ON/OFF", "toggle:emergency_market_close"), b("Post-close ON/OFF", "toggle:post_only_close")],
-        [b("🌊 Price Tsunami Basket v0069", "preset:plus"), b("Custom mode", "preset:custom")],
+        [
+            b(_check_float(s.get('position_margin_percent'), 10) + "Size 10%", "set:position_margin_percent:10"),
+            b(_check_float(s.get('position_margin_percent'), 15) + "Size 15%", "set:position_margin_percent:15"),
+            b(_check_float(s.get('position_margin_percent'), 20) + "Size 20%", "set:position_margin_percent:20"),
+        ],
+        [
+            b(_check_int(s.get('wave_positions'), 3) + "Basket 3", "set:wave_positions:3"),
+            b(_check_int(s.get('wave_positions'), 5) + "Basket 5", "set:wave_positions:5"),
+        ],
+        [
+            b(_check_float(s.get('wave_normal_target_profit_usdt'), 0.03) + "NET +$0.03", "set:wave_normal_target_profit_usdt:0.03"),
+            b(_check_float(s.get('wave_normal_target_profit_usdt'), 0.05) + "NET +$0.05", "set:wave_normal_target_profit_usdt:0.05"),
+        ],
+        [
+            b(_check_float(s.get('wave_tsunami_target_profit_usdt'), 0.10) + "Tsunami +$0.10", "set:wave_tsunami_target_profit_usdt:0.10"),
+            b(_check_float(s.get('wave_tsunami_target_profit_usdt'), 0.15) + "Tsunami +$0.15", "set:wave_tsunami_target_profit_usdt:0.15"),
+        ],
+        [
+            b(_check_float(s.get('wave_early_min_side_ratio'), 0.60) + "Early 60%", "set:wave_early_min_side_ratio:0.60"),
+            b(_check_float(s.get('wave_early_min_side_ratio'), 0.65) + "Early 65%", "set:wave_early_min_side_ratio:0.65"),
+        ],
+        [
+            b(_check_float(s.get('wave_min_side_ratio'), 0.70) + "Normal 70%", "set:wave_min_side_ratio:0.70"),
+            b(_check_float(s.get('wave_min_side_ratio'), 0.75) + "Normal 75%", "set:wave_min_side_ratio:0.75"),
+        ],
+        [
+            b(_check_float(s.get('wave_accel_trigger_pct'), 10) + "Ускор. 10п.п.", "set:wave_accel_trigger_pct:10"),
+            b(_check_float(s.get('wave_accel_trigger_pct'), 15) + "Ускор. 15п.п.", "set:wave_accel_trigger_pct:15"),
+        ],
+        [
+            b(_check_int(s.get('wave_signal_hold_required'), 3) + "Hold 3/5", "set:wave_signal_hold_required:3"),
+            b(_check_int(s.get('wave_signal_hold_required'), 4) + "Hold 4/5", "set:wave_signal_hold_required:4"),
+        ],
+        [
+            b(_check_float(s.get('telegram_live_update_sec'), 5) + "Panel 5s", "set:telegram_live_update_sec:5"),
+            b(_check_float(s.get('telegram_live_update_sec'), 10) + "Panel 10s", "set:telegram_live_update_sec:10"),
+        ],
         [b("⬅️ Back to Live", "menu:main")],
     ])
 
@@ -276,7 +356,7 @@ def settings_menu() -> InlineKeyboardMarkup:
 def symbols_text(engine: MicroMakerEngine | None = None) -> str:
     """Clean Symbols screen.
 
-    v0069: show what matters first: raw zero-fee count, blocked count,
+    v0076: show what matters first: raw zero-fee count, blocked count,
     ignored count, trade universe, and current scan readiness. Long explanatory
     text is removed from the main Telegram card.
     """
@@ -322,7 +402,7 @@ def symbols_text(engine: MicroMakerEngine | None = None) -> str:
     if str(s.get('wave_market_signal_mode') or 'all_zero_total') == 'top10_leaders':
         leaders_line = "TOP10 leaders: " + (", ".join(leader_symbols[:10]) if leader_symbols else "будут выбраны после scan") + "\n"
     return (
-        f"📈 Symbols / Universe {s.get('bot_version', 'v0069')}\n\n"
+        f"📈 Symbols / Universe {s.get('bot_version', 'v0076')}\n\n"
         "РЕЖИМ\n"
         f"Auto-select: {'ON' if s.get('auto_select_symbols') else 'OFF'}\n"
         f"Signal: {s.get('wave_market_signal_mode', 'all_zero_total')}\n"
@@ -351,28 +431,14 @@ def symbols_text(engine: MicroMakerEngine | None = None) -> str:
         f"Basket slots: {int(s.get('wave_positions') or 5)}\n\n"
         "КОМАНДЫ\n"
         "/symbols LINK_USDT,SOL_USDT — whitelist\n"
-        "/symbols clear — FULL AUTO\n"
-        "/ignore clear или /clear_ignored — очистить ignored"
+        "/symbols clear — FULL AUTO"
     )
 
 
 def symbols_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [b("Auto-select ON/OFF", "toggle:auto_select_symbols"), b("ZeroFee ON/OFF", "toggle:only_zero_fee")],
-        [b(("✅ " if STORE.load().get('wave_market_signal_mode') == 'all_zero_total' else "") + "Signal ALL", "set:wave_market_signal_mode:all_zero_total"), b(("✅ " if STORE.load().get('wave_market_signal_mode') == 'top10_leaders' else "") + "Signal TOP10", "set:wave_market_signal_mode:top10_leaders")],
-        [b("Manual fallback ON/OFF", "toggle:allow_manual_fee_fallback"), b("🔍 Price Scan", "mm:scan")],
-        [b("WS ON/OFF", "toggle:ws_depth_enabled"), b("MD WS", "set:market_data_mode:websocket"), b("MD REST", "set:market_data_mode:rest")],
-        [b("Scan 1s", "set:scan_interval_sec:1"), b("Scan 3s", "set:scan_interval_sec:3"), b("Scan 5s", "set:scan_interval_sec:5")],
-        [b("Scan ALL", "set:max_zero_fee_scan_symbols:0"), b("Cap 250", "set:max_zero_fee_scan_symbols:250"), b("Cap 100", "set:max_zero_fee_scan_symbols:100")],
-        [b("WS ALL", "set:ws_depth_max_symbols:0"), b("WS 250", "set:ws_depth_max_symbols:250"), b("WS 100", "set:ws_depth_max_symbols:100")],
-        [b("Rescan 60s", "set:zero_fee_rescan_sec:60"), b("Clear ignore", "ignore:clear")],
-        [b("Depth $50", "set:min_depth_usdt:50"), b("$75", "set:min_depth_usdt:75"), b("$100", "set:min_depth_usdt:100")],
-        [b("Depth x3", "set:min_depth_multiplier:3"), b("x4", "set:min_depth_multiplier:4"), b("x5", "set:min_depth_multiplier:5")],
-        [b("Imb 1.20", "set:min_imbalance_ratio:1.20"), b("1.30", "set:min_imbalance_ratio:1.30"), b("1.45", "set:min_imbalance_ratio:1.45")],
-        [b("Score 25", "set:min_trade_score:25"), b("35", "set:min_trade_score:35"), b("45", "set:min_trade_score:45")],
-        [b("Switch +5%", "set:switch_score_improvement_pct:5"), b("+10%", "set:switch_score_improvement_pct:10"), b("+20%", "set:switch_score_improvement_pct:20")],
-        [b("Spread 1-2", "preset:spread:1:2"), b("Spread 1-4", "preset:spread:1:4"), b("Spread 2-6", "preset:spread:2:6")],
-        [b("Clear whitelist", "symbols:clear"), b("⬅️ Back to Live", "menu:main")],
+        [b("Clear whitelist", "symbols:clear"), b("Clear ignore", "ignore:clear")],
+        [b("🔍 Price Scan", "mm:scan"), b("⬅️ Back to Live", "menu:main")],
     ])
 
 
@@ -385,8 +451,12 @@ def api_text() -> str:
         "Сохранить: /api set API_KEY API_SECRET\n"
         "Проверить: /api status\n"
         "Удалить: /api clear\n\n"
-        "В v0028 ввод API НЕ удаляется из чата: бот сохраняет ключи, оставляет сообщение и отвечает коротко: ✅ API saved."
+        "Ввод API не удаляется из чата: бот сохраняет ключи, оставляет сообщение и отвечает коротко: ✅ API saved."
     )
+
+
+def api_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[b("⬅️ Back to Live", "menu:main")]])
 
 
 async def ensure_engine(context: ContextTypes.DEFAULT_TYPE, chat_id: int | None = None) -> MicroMakerEngine:
@@ -454,7 +524,7 @@ def panel_text(engine: MicroMakerEngine | None = None) -> str:
         return e.quick_status_text()
     s = STORE.load()
     return (
-        f"🌊 Price Tsunami {s.get('bot_version', 'v0069')}\n"
+        f"🌊 Price Tsunami {s.get('bot_version', 'v0076')}\n"
         "State: STOPPED\n\n"
         "PRICE SCAN 10s: пока нет данных.\n"
         "LONG 0% | SHORT 0% | NEUTRAL 0%\n"
@@ -464,7 +534,7 @@ def panel_text(engine: MicroMakerEngine | None = None) -> str:
         "Normal: сейчас >=75% стороны → 5 сделок, 5x, NET +$0.05\n"
         "Tsunami: сейчас >=75% и эта же сторона выросла на +15п.п. за 60s → 5 сделок, 10x, NET +$0.10\n"
         "65/75 — итог сейчас; +15п.п. уже внутри этих процентов.\n"
-        "v0069: сигнал должен держаться 4 из 5 checks за ~10s; один шумовой провал не сбрасывает сигнал.\n\n"
+        "v0076: сигнал должен держаться 4 из 5 checks за ~10s; один шумовой провал не сбрасывает сигнал.\n\n"
         "Stop = пауза, позиции/ордера не трогает. Close All = снести всё.\n"
         "Нажми ▶️ Start Tsunami."
     )
@@ -622,6 +692,58 @@ async def edit_query_as_panel(q, text: str, reply_markup: InlineKeyboardMarkup, 
             return
 
 
+def query_is_live_panel(q) -> bool:
+    """True only for the stored auto-refresh scan panel."""
+    try:
+        s = STORE.load()
+        return bool(
+            q.message
+            and int(q.message.chat_id) == int(s.get("telegram_panel_chat_id") or 0)
+            and int(q.message.message_id) == int(s.get("telegram_panel_message_id") or 0)
+        )
+    except Exception:
+        return False
+
+
+async def edit_query_message(q, text: str, reply_markup: InlineKeyboardMarkup | None = None) -> None:
+    """Edit a tool/private message without registering it as the live scan panel."""
+    if not q.message:
+        return
+    try:
+        await q.edit_message_text(text[:3900], reply_markup=reply_markup)
+    except BadRequest as e:
+        if "Message is not modified" in str(e):
+            return
+        log_error("telegram_edit_query_message_bad_request", e)
+    except TelegramError as e:
+        log_error("telegram_edit_query_message_error", e)
+    except Exception as e:
+        log_error("telegram_edit_query_message_unexpected", e)
+
+
+async def send_tool_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str, reply_markup: InlineKeyboardMarkup | None = None) -> int:
+    """Send service output separately so the 5s live panel cannot overwrite it."""
+    msg = await context.bot.send_message(chat_id=chat_id, text=text[:3900], reply_markup=reply_markup)
+    return int(msg.message_id)
+
+
+async def show_tool_screen(q, context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str, reply_markup: InlineKeyboardMarkup | None = None) -> None:
+    """Open Settings/Universe/API as separate messages from the live panel.
+
+    If the button was pressed on the live scan panel, send a new message.
+    If it was pressed inside an already separate tool message, edit that tool
+    message in place. In both cases the stored live panel id is left unchanged.
+    """
+    if q.message and not query_is_live_panel(q):
+        await edit_query_message(q, text, reply_markup)
+        return
+    await send_tool_message(context, chat_id, text, reply_markup)
+
+
+async def reply_tool_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str, reply_markup: InlineKeyboardMarkup | None = None) -> None:
+    await send_tool_message(context, chat_id, text, reply_markup)
+
+
 async def update_live_panel(app: Application, force: bool = False) -> None:
     s = STORE.load()
     if not bool(s.get("telegram_live_panel")):
@@ -681,7 +803,7 @@ async def update_live_panel(app: Application, force: bool = False) -> None:
 
 
 async def live_panel_loop(app: Application) -> None:
-    """v0069 clean rollback panel loop.
+    """v0076 clean rollback panel loop.
 
     RUNNING: edit one current scan panel every 5 sec.
     Every 10 min: delete all known scan panels and send one fresh panel down.
@@ -751,7 +873,7 @@ async def api_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     args = context.args or []
     if not args or args[0].lower() in {"status", "show"}:
-        await upsert_panel(context, chat_id, api_text(), main_menu(), mode="api")
+        await reply_tool_message(context, chat_id, api_text(), api_menu())
         return
     if args[0].lower() == "set":
         if len(args) < 3:
@@ -763,9 +885,9 @@ async def api_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     if args[0].lower() == "clear":
         STORE.update({"mexc_api_key": "", "mexc_api_secret": ""})
-        await upsert_panel(context, chat_id, "✅ MEXC API удалён.\n\n" + api_text(), main_menu(), mode="api")
+        await reply_tool_message(context, chat_id, "✅ MEXC API удалён.\n\n" + api_text(), api_menu())
         return
-    await upsert_panel(context, chat_id, "Usage: /api set API_KEY API_SECRET | /api status | /api clear", main_menu(), mode="api")
+    await reply_tool_message(context, chat_id, "Usage: /api set API_KEY API_SECRET | /api status | /api clear", api_menu())
 
 
 def _parse_api_plain_text(text: str) -> tuple[str, str] | None:
@@ -821,13 +943,13 @@ async def preset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     args = [a.lower() for a in (context.args or [])]
     if args and args[0] in {"custom", "manual"}:
         STORE.set("trade_profile", "custom")
-        await upsert_panel(context, chat_id, "✅ Custom mode включён: дальше /set не будет перетираться миграцией профиля.\n\n" + settings_text(), settings_menu(), mode="settings")
+        await reply_tool_message(context, chat_id, "✅ Custom mode включён: дальше /set не будет перетираться миграцией профиля.\n\n" + settings_text(), settings_menu())
         return
     apply_plus_profile()
     engine = await ensure_engine(context, chat_id)
     reset_engine_signal_state(engine)
     engine.clear_ignored_symbols()
-    await upsert_panel(context, chat_id, "🌊 Price Tsunami v0069 применён: 10s price-scan, итоговые 65/75% + рост 15п.п., 5 LONG/SHORT, 5x/10x, REAL NET выход.\n\n" + settings_text(), settings_menu(), mode="settings")
+    await reply_tool_message(context, chat_id, "🌊 Price Tsunami v0076 применён: 10s price-scan, итоговые 65/75% + рост 15п.п., 5 LONG/SHORT, 5x/10x, REAL NET выход.\n\n" + settings_text(), settings_menu())
 
 
 async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -837,7 +959,7 @@ async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     args = context.args or []
     if len(args) < 2:
-        await upsert_panel(context, chat_id, "Usage: /set leverage 5 | /set size 10 | /set scan_interval_sec 5", settings_menu(), mode="settings")
+        await reply_tool_message(context, chat_id, "Usage: /set leverage 5 | /set size 10 | /set scan_interval_sec 5", settings_menu())
         return
     alias = {
         "margin": "margin_per_position_usdt",
@@ -897,7 +1019,7 @@ async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     }
     key = alias.get(args[0].lower(), args[0].lower())
     if key not in DEFAULTS:
-        await upsert_panel(context, chat_id, f"Unknown setting: {key}", settings_menu(), mode="settings")
+        await reply_tool_message(context, chat_id, f"Unknown setting: {key}", settings_menu())
         return
     raw = args[1]
     old = DEFAULTS[key]
@@ -905,7 +1027,7 @@ async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if key == "wave_market_signal_mode":
             normalized = normalize_market_mode(raw)
             if not normalized:
-                await upsert_panel(context, chat_id, "❌ market mode: используй all или top10", settings_menu(), mode="settings")
+                await reply_tool_message(context, chat_id, "❌ market mode: используй all или top10", settings_menu())
                 return
             val = normalized
         elif isinstance(old, bool):
@@ -920,11 +1042,11 @@ async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if key == "wave_market_signal_mode":
             reset_engine_signal_state(ENGINE)
         if key in {"scan_interval_sec", "max_zero_fee_scan_symbols", "zero_fee_rescan_sec", "zero_fee_universe_max_symbols", "min_depth_usdt", "min_depth_multiplier", "switch_score_improvement_pct", "min_imbalance_ratio", "min_trade_score", "entry_recheck_ms", "entry_recheck_required", "entry_recheck_count", "cooldown_after_loss_sec", "cooldown_after_trade_sec", "market_data_mode", "ws_depth_enabled", "ws_depth_max_symbols", "ws_book_stale_ms"}:
-            await upsert_panel(context, chat_id, f"✅ {key} = {val}\n\n" + symbols_text(), symbols_menu(), mode="symbols")
+            await reply_tool_message(context, chat_id, f"✅ {key} = {val}\n\n" + symbols_text(), symbols_menu())
         else:
-            await upsert_panel(context, chat_id, f"✅ {key} = {val}\n\n" + settings_text(), settings_menu(), mode="settings")
+            await reply_tool_message(context, chat_id, f"✅ {key} = {val}\n\n" + settings_text(), settings_menu())
     except Exception as e:
-        await upsert_panel(context, chat_id, f"❌ {e}", settings_menu(), mode="settings")
+        await reply_tool_message(context, chat_id, f"❌ {e}", settings_menu())
 
 
 async def symbols_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -936,14 +1058,14 @@ async def symbols_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     raw = " ".join(context.args or []).strip()
     if raw.lower() in {"clear", "auto", "all", "*"}:
         STORE.set("allowed_symbols", "")
-        await upsert_panel(context, chat_id, "✅ Whitelist очищен. Включён FULL AUTO.\n\n" + symbols_text(engine), symbols_menu(), mode="symbols")
+        await reply_tool_message(context, chat_id, "✅ Whitelist очищен. Включён FULL AUTO.\n\n" + symbols_text(engine), symbols_menu())
         return
     syms = parse_symbols(raw)
     if not syms:
-        await upsert_panel(context, chat_id, symbols_text(engine), symbols_menu(), mode="symbols")
+        await reply_tool_message(context, chat_id, symbols_text(engine), symbols_menu())
         return
     STORE.set("allowed_symbols", ",".join(syms))
-    await upsert_panel(context, chat_id, "✅ Whitelist updated:\n" + ", ".join(syms) + "\n\n" + symbols_text(engine), symbols_menu(), mode="symbols")
+    await reply_tool_message(context, chat_id, "✅ Whitelist updated:\n" + ", ".join(syms) + "\n\n" + symbols_text(engine), symbols_menu())
 
 
 async def market_mode_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -961,16 +1083,16 @@ async def market_mode_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             msg = "✅ Market signal mode: all_zero_total — рынок считается по всему zero-fee universe."
         else:
             msg = "✅ Market signal mode: top10_leaders — рынок считают TOP10 ликвидных non-stable, входы из полного zero-fee universe."
-        await upsert_panel(context, chat_id, msg + "\n\n" + settings_text(), settings_menu(), mode="settings")
+        await reply_tool_message(context, chat_id, msg + "\n\n" + settings_text(), settings_menu())
         return
     s = STORE.load()
-    await upsert_panel(
+    await reply_tool_message(
         context, chat_id,
         "Market signal mode: " + str(s.get("wave_market_signal_mode", "all_zero_total")) + "\n\n"
         "Команды:\n"
         "/market_mode all — как сейчас, рынок по всему zero-fee universe\n"
         "/market_mode top10 — TOP10 направление: 7/10 normal, 7/10 +2 early, 8/10 tsunami; входы из полного zero-fee",
-        settings_menu(), mode="settings")
+        settings_menu())
 
 
 async def ignore_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -982,9 +1104,9 @@ async def ignore_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     args = [a.lower() for a in (context.args or [])]
     if args and args[0] in {"clear", "reset", "0"}:
         msg = engine.clear_ignored_symbols()
-        await upsert_panel(context, chat_id, msg + "\n\n" + symbols_text(engine), symbols_menu(), mode="symbols")
+        await reply_tool_message(context, chat_id, msg + "\n\n" + symbols_text(engine), symbols_menu())
         return
-    await upsert_panel(context, chat_id, engine.ignored_symbols_text(), symbols_menu(), mode="symbols")
+    await reply_tool_message(context, chat_id, engine.ignored_symbols_text(), symbols_menu())
 
 
 async def clear_ignored_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -994,7 +1116,7 @@ async def clear_ignored_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
     engine = await ensure_engine(context, chat_id)
     msg = engine.clear_ignored_symbols()
-    await upsert_panel(context, chat_id, msg + "\n\n" + symbols_text(engine), symbols_menu(), mode="symbols")
+    await reply_tool_message(context, chat_id, msg + "\n\n" + symbols_text(engine), symbols_menu())
 
 
 async def close_all_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1004,7 +1126,7 @@ async def close_all_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     engine = await ensure_engine(context, chat_id)
     msg = await engine.close_all()
-    await upsert_panel(context, chat_id, msg + "\n\n" + panel_text(engine), main_menu(), mode="main")
+    await context.bot.send_message(chat_id=chat_id, text=(msg + "\n\n" + panel_text(engine))[:3900])
 
 
 
@@ -1089,23 +1211,12 @@ async def trades_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await context.bot.send_message(chat_id=chat_id, text=engine.trades_counter_text()[:3900])
 
 
-async def log_full_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await safe_delete_message(context, update)
-    chat_id = update.effective_chat.id if update.effective_chat else None
-    if not chat_id:
-        return
-    engine = await ensure_engine(context, chat_id)
-    args = [a.lower() for a in (context.args or [])]
-    if args and args[0] in {"clear", "reset", "0"}:
-        clear_full_log()
-        log_event("log_full_cleared_by_user", chat_id=chat_id)
-        await context.bot.send_message(chat_id=chat_id, text="✅ log_full очищен. Новый лог начнёт писаться сразу после следующего действия бота.")
-        return
+async def send_log_full_document(context: ContextTypes.DEFAULT_TYPE, chat_id: int, engine: MicroMakerEngine | None = None) -> None:
     try:
         await context.bot.send_message(chat_id=chat_id, text=f"📄 /log_full {STORE.load().get('bot_version')}: собираю и отправляю TXT-файл...")
         log_event("log_full_export_requested", chat_id=chat_id)
-        path = export_full_log(STORE.load(), engine)
-        caption = f"📄 Full debug log {STORE.load().get('bot_version', 'v0069')}"
+        path = export_full_log(STORE.load(), engine or ENGINE)
+        caption = f"📄 Full debug log {STORE.load().get('bot_version', 'v0076')}"
         with open(path, "rb") as f:
             await asyncio.wait_for(context.bot.send_document(
                 chat_id=chat_id,
@@ -1117,6 +1228,15 @@ async def log_full_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     except Exception as e:
         log_error("log_full_export_error", e, chat_id=chat_id)
         await context.bot.send_message(chat_id=chat_id, text=f"❌ log_full error: {str(e)[:800]}")
+
+
+async def log_full_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await safe_delete_message(context, update)
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if not chat_id:
+        return
+    engine = await ensure_engine(context, chat_id)
+    await send_log_full_document(context, chat_id, engine)
 
 
 async def log_tail_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1182,31 +1302,41 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 
+def doctor_text(engine: MicroMakerEngine | None = None) -> str:
+    e = engine or ENGINE
+    s = STORE.load()
+    if e is None:
+        return f"🩺 Doctor {s.get('bot_version')}\nEngine не создан."
+    now = time.time()
+    task = getattr(e, "task", None)
+    return (
+        f"🩺 Doctor {s.get('bot_version')}\n"
+        f"running: {bool(e.is_running())}\n"
+        f"task: {'none' if not task else ('done' if task.done() else 'alive')}\n"
+        f"panel_mode: {s.get('telegram_panel_mode')}\n"
+        f"panel_msg: {s.get('telegram_panel_message_id')}\n"
+        f"panel_age: {now - float(s.get('telegram_panel_created_ts') or now):.1f}s\n"
+        f"panel_cycle: {s.get('telegram_panel_cycle_sec')}s\n"
+        f"last_scan_age: {now - float(e.stats.last_scan_ts or 0):.1f}s\n"
+        f"loop_ticks: {getattr(e.stats, 'loop_tick_count', 0)}\n"
+        f"loop_heartbeat_age: {now - float(getattr(e.stats, 'loop_heartbeat_ts', 0.0) or now):.1f}s\n"
+        f"loop_last_tick_ms: {float(getattr(e.stats, 'loop_last_tick_ms', 0.0) or 0.0):.1f}\n"
+        f"loop_timeouts: {getattr(e.stats, 'loop_timeout_count', 0)}\n"
+        f"api_errors: {e.stats.api_errors}\n"
+        f"last_error: {e.stats.last_error or '-'}\n"
+        f"last_action: {e.stats.last_action or '-'}\n"
+        f"zero_fee: total={e.stats.zero_fee_total_count} universe={e.stats.zero_fee_universe_count}\n"
+        f"ws: books={e.stats.ws_books} fresh={e.stats.ws_fresh_books} stale_ms={s.get('ws_book_stale_ms')}\n"
+    )
+
+
 async def doctor_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await safe_delete_message(context, update)
     chat_id = update.effective_chat.id if update.effective_chat else None
     if not chat_id:
         return
     engine = await ensure_engine(context, chat_id)
-    s = STORE.load()
-    now = time.time()
-    task = getattr(engine, "task", None)
-    txt = (
-        f"🩺 Doctor {s.get('bot_version')}\n"
-        f"running: {bool(engine.is_running())}\n"
-        f"task: {'none' if not task else ('done' if task.done() else 'alive')}\n"
-        f"panel_mode: {s.get('telegram_panel_mode')}\n"
-        f"panel_msg: {s.get('telegram_panel_message_id')}\n"
-        f"panel_age: {now - float(s.get('telegram_panel_created_ts') or now):.1f}s\n"
-        f"panel_cycle: {s.get('telegram_panel_cycle_sec')}s\n"
-        f"last_scan_age: {now - float(engine.stats.last_scan_ts or 0):.1f}s\n"
-        f"api_errors: {engine.stats.api_errors}\n"
-        f"last_error: {engine.stats.last_error or '-'}\n"
-        f"last_action: {engine.stats.last_action or '-'}\n"
-        f"zero_fee: total={engine.stats.zero_fee_total_count} universe={engine.stats.zero_fee_universe_count}\n"
-        f"ws: books={engine.stats.ws_books} fresh={engine.stats.ws_fresh_books}\n"
-    )
-    await context.bot.send_message(chat_id=chat_id, text=txt[:3900])
+    await context.bot.send_message(chat_id=chat_id, text=doctor_text(engine)[:3900])
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await safe_delete_message(context, update)
@@ -1216,7 +1346,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await install_command_keyboard(context, chat_id)
     s = STORE.load()
     txt = (
-        f"🆘 Price Tsunami Help — {s.get('bot_version', 'v0069')}\n\n"
+        f"🆘 Price Tsunami Help — {s.get('bot_version', 'v0076')}\n\n"
         "Логика торговли:\n"
         "1) Бот держит ALL active zero-fee *_USDT universe, без лимита 250.\n"
         "2) Каждые ~10 секунд сравнивает mid-price каждой монеты.\n"
@@ -1228,18 +1358,18 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Tsunami: сейчас >=75% и эта же сторона выросла на +15п.п. за 60s → 5 сделок, 10x, REAL NET TP +$0.10.\n"
         "TOP10: 7/10 = NORMAL, 7/10 + рост +2 монеты за 60с = EARLY, 8/10 = TSUNAMI. Входы всё равно из полного zero-fee universe.\n"
         "Важно: 65% и 75% — текущий итоговый процент; +15п.п. уже внутри этого значения, это не 65+15.\n"
-        "v0069 HOLD: вход только когда сигнал подтверждён 4 из 5 checks за ~10s; один шумовой провал не сбрасывает сигнал.\n\n"
+        "v0076 HOLD: вход только когда сигнал подтверждён 4 из 5 checks за ~10s; один шумовой провал не сбрасывает сигнал.\n\n"
         "Выбор монет: не самый перегретый топ, а середина 25-60% same-side candidates.\n"
         "Все сделки открываются одной стороной: либо 5 LONG, либо 5 SHORT. Если MEXC режет быстрые заявки, бот ждёт и повторяет те же слоты, затем добирает заменами.\n"
         "Закрытие: вся корзина по REAL NET equity PnL. Через 10 минут закрывает только ноль/микроплюс; минус не режет, ждёт восстановления.\n\n"
-        "Кнопки:\n"
-        "▶️ Start Tsunami — запустить режим.\n"
+        "Кнопки live-панели:\n"
+        "▶️ Start Tsunami — запустить торговый режим.\n"
         "⏸ Stop/Pause — только пауза, позиции и ордера не трогает.\n"
-        "❌ Close All — отменяет ордера и закрывает позиции market.\n"
-        "🔍 Price Scan — показать текущие LONG/SHORT/NEUTRAL и вывод.\n\n"
-        "Команды: /api set KEY SECRET, /balance, /status, /log_full, /symbols clear, /set size 20, /set candidates 0."
+        "❌ Close All — отменяет ордера и закрывает позиции market.\n\n"
+        "Главное меню команд Telegram: /start, /scan, /balance, /status, /help.\n"
+        "Сервисные экраны Log Full / Doctor / API / Settings / Universe доступны inline-кнопками и открываются отдельными сообщениями. Команды /set, /symbols, /market_mode работают вручную."
     )
-    await upsert_panel(context, chat_id, txt, main_menu(), mode="main")
+    await context.bot.send_message(chat_id=chat_id, text=txt[:3900])
 
 
 async def _finish_panel_task(
@@ -1254,7 +1384,7 @@ async def _finish_panel_task(
 ) -> None:
     """Execute a slow action and refresh panel afterwards. Used so button callbacks answer instantly.
 
-    v0069: detail screens such as Price Scan should not append the live panel
+    v0076: detail screens such as Price Scan should not append the live panel
     underneath. Slow background actions are deduped and wrapped in a timeout so
     repeated button taps cannot leave endless pending UI tasks.
     """
@@ -1299,6 +1429,8 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await q.answer("❌ Close All запущен")
         elif data == "mm:start":
             await q.answer("▶️ Start Tsunami принят")
+        elif data.startswith("set:wave_market_signal_mode:"):
+            await q.answer("Signal mode переключён")
         else:
             await q.answer()
     except TelegramError:
@@ -1306,20 +1438,26 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     engine = await ensure_engine(context, chat_id)
 
     if data == "menu:main":
-        await edit_query_as_panel(q, panel_text(engine), main_menu(), mode="main")
+        if q.message and query_is_live_panel(q):
+            await edit_query_as_panel(q, panel_text(engine), main_menu(), mode="main")
+        elif q.message:
+            await edit_query_message(q, "⬅️ Live-панель не трогаю: она обновляется отдельным сообщением каждые 5 секунд.")
         return
     if data == "menu:settings":
-        await edit_query_as_panel(q, settings_text(), settings_menu(), mode="settings")
+        if chat_id:
+            await show_tool_screen(q, context, chat_id, settings_text(), settings_menu())
         return
     if data == "menu:symbols":
-        await edit_query_as_panel(q, symbols_text(engine), symbols_menu(), mode="symbols")
+        if chat_id:
+            await show_tool_screen(q, context, chat_id, symbols_text(engine), symbols_menu())
         return
     if data == "menu:api":
-        await edit_query_as_panel(q, api_text(), main_menu(), mode="api")
+        if chat_id:
+            await show_tool_screen(q, context, chat_id, api_text(), api_menu())
         return
     if data == "mm:start":
         if chat_id:
-            # Start must not toggle/pause. It sends one fresh scan panel down, then the live loop edits it every 5s.
+            # Start creates/sends the current live scan panel. Tool messages are never registered as panel.
             await send_fresh_panel(context, chat_id, "▶️ Start принят, запускаю цикл...\n\n" + panel_text(engine), main_menu(), mode="main")
 
             async def _start_and_refresh():
@@ -1352,11 +1490,13 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if data == "mm:close_all":
         engine.running = False
         STORE.set("live_enabled", False)
-        await edit_query_as_panel(q, "❌ Close All принят. Закрытие/отмена запущены в фоне...\n\n" + panel_text(engine), main_menu(), mode="main")
+        if chat_id:
+            await context.bot.send_message(chat_id=chat_id, text="❌ Close All принят. Закрытие/отмена запущены в фоне...")
         spawn_ui_task(_finish_panel_task(context, chat_id, engine, engine.close_all(), main_menu(), mode="main", timeout_sec=180.0), name="ui_close_all")
         return
     if data == "mm:status":
-        await edit_query_as_panel(q, panel_text(engine), main_menu(), mode="main")
+        if chat_id:
+            await context.bot.send_message(chat_id=chat_id, text=panel_text(engine)[:3900])
         return
     if data == "mm:scan":
         if chat_id:
@@ -1373,12 +1513,21 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     pass
             spawn_ui_task(_scan_reply(), name="ui_scan_now")
         return
+    if data == "mm:doctor":
+        if chat_id:
+            await context.bot.send_message(chat_id=chat_id, text=doctor_text(engine)[:3900])
+        return
+    if data == "mm:log_full":
+        if chat_id:
+            spawn_ui_task(send_log_full_document(context, chat_id, engine), name="ui_log_full")
+        return
     if data == "mm:balance":
         if chat_id:
             await context.bot.send_message(chat_id=chat_id, text=(await balance_text(engine))[:3900])
         return
     if data == "mm:trades":
-        await edit_query_as_panel(q, engine.trades_counter_text(), main_menu(), mode="main")
+        if chat_id:
+            await context.bot.send_message(chat_id=chat_id, text=engine.trades_counter_text()[:3900])
         return
     if data == "mm:fees":
         if chat_id:
@@ -1386,49 +1535,73 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     if data == "symbols:clear":
         STORE.set("allowed_symbols", "")
-        await edit_query_as_panel(q, symbols_text(engine), symbols_menu(), mode="symbols")
+        txt = "✅ Whitelist очищен. Включён FULL AUTO.\n\n" + symbols_text(engine)
+        if q.message and not query_is_live_panel(q):
+            await edit_query_message(q, txt, symbols_menu())
+        elif chat_id:
+            await send_tool_message(context, chat_id, txt, symbols_menu())
         return
     if data == "ignore:clear":
         msg = engine.clear_ignored_symbols()
-        await edit_query_as_panel(q, msg + "\n\n" + symbols_text(engine), symbols_menu(), mode="symbols")
+        txt = msg + "\n\n" + symbols_text(engine)
+        if q.message and not query_is_live_panel(q):
+            await edit_query_message(q, txt, symbols_menu())
+        elif chat_id:
+            await send_tool_message(context, chat_id, txt, symbols_menu())
         return
     if data == "preset:plus":
         apply_plus_profile()
         reset_engine_signal_state(engine)
         engine.clear_ignored_symbols()
-        await edit_query_as_panel(q, "🧺 Price Tsunami v0069 применён.\n\n" + settings_text(), settings_menu(), mode="settings")
+        txt = "🧺 Price Tsunami применён.\n\n" + settings_text()
+        if q.message and not query_is_live_panel(q):
+            await edit_query_message(q, txt, settings_menu())
+        elif chat_id:
+            await send_tool_message(context, chat_id, txt, settings_menu())
         return
     if data == "preset:custom":
         STORE.set("trade_profile", "custom")
-        await edit_query_as_panel(q, "✅ Custom mode включён.\n\n" + settings_text(), settings_menu(), mode="settings")
+        txt = "✅ Custom mode включён.\n\n" + settings_text()
+        if q.message and not query_is_live_panel(q):
+            await edit_query_message(q, txt, settings_menu())
+        elif chat_id:
+            await send_tool_message(context, chat_id, txt, settings_menu())
         return
     if data.startswith("preset:spread:"):
         _, _, mn, mx = data.split(":", 3)
         STORE.update({"min_spread_ticks": int(float(mn)), "max_spread_ticks": int(float(mx))})
-        await edit_query_as_panel(q, symbols_text(engine), symbols_menu(), mode="symbols")
+        txt = symbols_text(engine)
+        if q.message and not query_is_live_panel(q):
+            await edit_query_message(q, txt, symbols_menu())
+        elif chat_id:
+            await send_tool_message(context, chat_id, txt, symbols_menu())
         return
     if data.startswith("toggle:"):
         key = data.split(":", 1)[1]
         s = STORE.load()
         STORE.set(key, not bool(s.get(key)))
-        if key in {"auto_select_symbols", "allow_manual_fee_fallback", "only_zero_fee", "ws_depth_enabled"}:
-            await edit_query_as_panel(q, symbols_text(engine), symbols_menu(), mode="symbols")
-        else:
-            await edit_query_as_panel(q, settings_text(), settings_menu(), mode="settings")
+        txt = symbols_text(engine) if key in {"auto_select_symbols", "allow_manual_fee_fallback", "only_zero_fee", "ws_depth_enabled"} else settings_text()
+        markup = symbols_menu() if key in {"auto_select_symbols", "allow_manual_fee_fallback", "only_zero_fee", "ws_depth_enabled"} else settings_menu()
+        if q.message and not query_is_live_panel(q):
+            await edit_query_message(q, txt, markup)
+        elif chat_id:
+            await send_tool_message(context, chat_id, txt, markup)
         return
     if data.startswith("set:wave_market_signal_mode:"):
         _, key, raw = data.split(":", 2)
         value = normalize_market_mode(raw) or raw
         if value not in {"all_zero_total", "top10_leaders"}:
-            await edit_query_as_panel(q, "❌ market mode: используй all или top10", settings_menu(), mode="settings")
+            if chat_id:
+                await context.bot.send_message(chat_id=chat_id, text="❌ market mode: используй all или top10")
             return
         STORE.set(key, value)
         reset_engine_signal_state(engine)
-        return_mode = panel_mode_for_signal_return()
-        if return_mode == "symbols":
-            await edit_query_as_panel(q, symbols_text(engine), symbols_menu(), mode="symbols")
-        else:
-            await edit_query_as_panel(q, settings_text(), settings_menu(), mode="settings")
+        if q.message and query_is_live_panel(q):
+            await edit_query_as_panel(q, panel_text(engine), main_menu(), mode="main")
+        elif q.message:
+            await edit_query_message(q, settings_text(), settings_menu())
+        elif chat_id:
+            await send_tool_message(context, chat_id, settings_text(), settings_menu())
         return
     if data.startswith("set:"):
         _, key, raw = data.split(":", 2)
@@ -1444,13 +1617,24 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 value = raw
             STORE.set(key, value)
             if key in {"scan_interval_sec", "max_zero_fee_scan_symbols", "zero_fee_rescan_sec", "zero_fee_universe_max_symbols", "min_depth_usdt", "min_depth_multiplier", "switch_score_improvement_pct", "min_spread_ticks", "max_spread_ticks", "min_imbalance_ratio", "min_trade_score", "entry_recheck_ms", "entry_recheck_required", "entry_recheck_count", "cooldown_after_loss_sec", "cooldown_after_trade_sec", "market_data_mode", "ws_depth_enabled", "ws_depth_max_symbols", "ws_book_stale_ms"}:
-                await edit_query_as_panel(q, symbols_text(engine), symbols_menu(), mode="symbols")
+                txt = symbols_text(engine)
+                markup = symbols_menu()
             else:
-                await edit_query_as_panel(q, settings_text(), settings_menu(), mode="settings")
+                txt = settings_text()
+                markup = settings_menu()
+            if q.message and not query_is_live_panel(q):
+                await edit_query_message(q, txt, markup)
+            elif chat_id:
+                await send_tool_message(context, chat_id, txt, markup)
         except Exception as e:
-            await edit_query_as_panel(q, f"❌ {e}", settings_menu(), mode="settings")
+            if q.message and not query_is_live_panel(q):
+                await edit_query_message(q, f"❌ {e}", settings_menu())
+            elif chat_id:
+                await context.bot.send_message(chat_id=chat_id, text=f"❌ {e}")
         return
 
+    if chat_id:
+        await context.bot.send_message(chat_id=chat_id, text="ℹ️ Эта старая кнопка больше не используется в v0076. Нажми /start для новой live-панели.")
 
 
 async def runtime_watchdog_loop(app: Application) -> None:
@@ -1496,19 +1680,10 @@ async def post_init(app: Application) -> None:
     try:
         await app.bot.set_my_commands([
             BotCommand("start", "Открыть live-панель"),
-            BotCommand("ping", "Отклик, память, uptime, версия"),
+            BotCommand("scan", "Разовый read-only Price Scan"),
             BotCommand("balance", "Баланс USDT и позиции"),
             BotCommand("status", "Полный статус бота"),
-            BotCommand("trades", "Счётчик сделок"),
-            BotCommand("log_full", "Полный .txt лог для диагностики"),
-            BotCommand("log_tail", "Хвост текущего лога текстом"),
-            BotCommand("scan", "Разовый read-only Price Scan"),
-            BotCommand("fees", "Cached zero-fee status"),
-            BotCommand("doctor", "Runtime диагностика"),
             BotCommand("help", "Справка"),
-            BotCommand("preset", "Plus/custom профиль"),
-            BotCommand("market_mode", "all или top10 режим сигнала рынка"),
-            BotCommand("clear_ignored", "Очистить ignored-лист"),
         ])
     except TelegramError:
         pass

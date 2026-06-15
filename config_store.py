@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 DEFAULTS: dict[str, Any] = {
-    "bot_version": "v0069",
+    "bot_version": "v0076",
 
     # secrets are set from Telegram with /api set KEY SECRET. Telegram token stays in ENV.
     "mexc_api_key": "",
@@ -105,7 +105,7 @@ DEFAULTS: dict[str, Any] = {
     "max_entry_maker_fee_rate": 0.0,
     "max_entry_taker_fee_rate": 0.0,
     "fee_guard_ignore_symbol": True,
-    "trade_profile": "wave_price_tsunami_v0069",
+    "trade_profile": "wave_price_tsunami_v0076",
     "edge_filter_enabled": False,
     "entry_top_imbalance_ratio": 1.15,
     "entry_microprice_min_ticks": 0.10,
@@ -162,7 +162,7 @@ DEFAULTS: dict[str, Any] = {
     "wave_close_mode": "market",
     "wave_entry_post_only": False,
     "wave_entry_order_lifetime_ms": 450,
-    # v0069: aggressive entry must not wait in queue. Pick an existing book
+    # v0076: aggressive entry must not wait in queue. Pick an existing book
     # level with enough cumulative liquidity, place a normal LIMIT there,
     # wait briefly, then cancel leftovers.
     "wave_entry_book_sweep_levels": 5,
@@ -186,11 +186,11 @@ DEFAULTS: dict[str, Any] = {
     "wave_fill_topup_rounds": 5,
     "wave_open_max_attempts_multiplier": 5.0,
 
-    # v0069 Price Tsunami mode: global 10s price vote, clean early/normal/tsunami rules.
+    # v0076 Price Tsunami mode: global 10s price vote, clean early/normal/tsunami rules.
     # Count how many ALL active zero-fee coins rose/fell over 10 seconds, then use 60-second
     # dominance growth to catch an early market wave.
     "wave_price_vote_enabled": True,
-    # v0069: market signal mode switch. all_zero_total keeps the current
+    # v0076: market signal mode switch. all_zero_total keeps the current
     # full zero-fee universe vote. top10_leaders uses the 10 most liquid
     # non-stable zero-fee USDT leaders for direction; trade entries still
     # use the full zero-fee universe. TOP10 rules: 7/10 NORMAL,
@@ -206,7 +206,7 @@ DEFAULTS: dict[str, Any] = {
     "wave_price_min_move_pct": 0.015,
     "wave_accel_lookback_sec": 60.0,
     "wave_accel_trigger_pct": 15.0,
-    # v0069: signal must HOLD, not just flash for one scan tick.
+    # v0076: signal must HOLD, not just flash for one scan tick.
     # Example: Early requires current side >=65% AND +15p.p. growth.
     # Stable entry requires 4 of last 5 hold samples over about 10 seconds.
     "wave_signal_hold_checks": 5,
@@ -229,7 +229,7 @@ DEFAULTS: dict[str, Any] = {
     "market_data_mode": "websocket",  # websocket | rest
     "ws_depth_enabled": True,
     "ws_depth_max_symbols": 0,
-    "ws_book_stale_ms": 700,
+    "ws_book_stale_ms": 1200,
     "ws_warmup_ms": 350,
     "rest_depth_fallback": True,
     # Scanner REST fallback in WS mode. 0 = safest/fastest: scan only local WS cache,
@@ -242,6 +242,14 @@ DEFAULTS: dict[str, Any] = {
     "max_consecutive_losses": 999,
     "max_trades_per_hour": 120,
     "stop_on_api_errors": 999,
+    # Runtime/private API throttles. Prevents balance/positions private requests
+    # from running on every 100ms loop tick and freezing/rate-limiting the bot.
+    "runtime_loop_tick_timeout_sec": 22.0,
+    "private_balance_poll_sec": 12.0,
+    "private_positions_poll_sec": 8.0,
+    "private_manage_positions_poll_sec": 1.0,
+    "private_manage_balance_poll_sec": 1.5,
+    "position_margin_cache_sec": 5.0,
 
     # Persistent counters. They are updated after every closed trade and survive bot restarts.
     "total_trades_count": 0,
@@ -259,7 +267,7 @@ DEFAULTS: dict[str, Any] = {
     "telegram_panel_chat_id": 0,
     "telegram_panel_message_id": 0,
     "telegram_panel_mode": "main",  # main | settings | symbols | api
-    # v0069 clean panel lifecycle: edit one panel every 5s, rotate once per 10m.
+    # v0076 clean panel lifecycle: edit one panel every 5s, rotate once per 10m.
     "telegram_panel_message_ids": [],
     "telegram_panel_created_ts": 0.0,
     "telegram_panel_cycle_sec": 600.0,
@@ -322,7 +330,7 @@ WAVE_HUNTER_PROFILE_V0032: dict[str, Any] = {
     "max_entry_maker_fee_rate": 0.0,
     "max_entry_taker_fee_rate": 0.0,
     "fee_guard_ignore_symbol": True,
-    "trade_profile": "wave_price_tsunami_v0069",
+    "trade_profile": "wave_price_tsunami_v0076",
     "edge_filter_enabled": False,
     "entry_top_imbalance_ratio": 1.15,
     "entry_microprice_min_ticks": 0.10,
@@ -376,7 +384,7 @@ WAVE_HUNTER_PROFILE_V0032: dict[str, Any] = {
     "wave_close_mode": "market",
     "wave_entry_post_only": False,
     "wave_entry_order_lifetime_ms": 450,
-    # v0069: aggressive entry must not wait in queue. Pick an existing book
+    # v0076: aggressive entry must not wait in queue. Pick an existing book
     # level with enough cumulative liquidity, place a normal LIMIT there,
     # wait briefly, then cancel leftovers.
     "wave_entry_book_sweep_levels": 5,
@@ -400,11 +408,11 @@ WAVE_HUNTER_PROFILE_V0032: dict[str, Any] = {
     "wave_fill_topup_rounds": 5,
     "wave_open_max_attempts_multiplier": 5.0,
 
-    # v0069 Price Tsunami mode: global 10s price vote, clean early/normal/tsunami rules.
+    # v0076 Price Tsunami mode: global 10s price vote, clean early/normal/tsunami rules.
     # Count how many ALL active zero-fee coins rose/fell over 10 seconds, then use 60-second
     # dominance growth to catch an early market wave.
     "wave_price_vote_enabled": True,
-    # v0069: market signal mode switch. all_zero_total keeps the current
+    # v0076: market signal mode switch. all_zero_total keeps the current
     # full zero-fee universe vote. top10_leaders uses the 10 most liquid
     # non-stable zero-fee USDT leaders for direction; trade entries still
     # use the full zero-fee universe. TOP10 rules: 7/10 NORMAL,
@@ -420,7 +428,7 @@ WAVE_HUNTER_PROFILE_V0032: dict[str, Any] = {
     "wave_price_min_move_pct": 0.015,
     "wave_accel_lookback_sec": 60.0,
     "wave_accel_trigger_pct": 15.0,
-    # v0069: signal must HOLD, not just flash for one scan tick.
+    # v0076: signal must HOLD, not just flash for one scan tick.
     # Example: Early requires current side >=65% AND +15p.p. growth.
     # Stable entry requires 4 of last 5 hold samples over about 10 seconds.
     "wave_signal_hold_checks": 5,
@@ -525,7 +533,7 @@ class ConfigStore:
         except Exception:
             pass
 
-        # v0069 rollback safety: never inherit broken mirror-era Telegram behavior from old settings.
+        # v0076 rollback safety: never inherit broken mirror-era Telegram behavior from old settings.
         out["telegram_delete_command_messages"] = False
         out["telegram_reply_keyboard"] = False
         out["telegram_reply_keyboard_delete_hint"] = False
@@ -534,6 +542,20 @@ class ConfigStore:
         out["telegram_panel_cycle_sec"] = 600.0
         out["telegram_panel_refresh_mode"] = "edit_rotate"
         out["stop_on_api_errors"] = 999
+        # v0076 UI default: the live toggle starts from ALL total after upgrade.
+        # The user can switch to TOP10 with one tap on the live panel.
+        try:
+            if str(data.get("bot_version") or "") != DEFAULTS["bot_version"] and str(data.get("trade_profile") or "") != "custom":
+                out["wave_market_signal_mode"] = DEFAULTS["wave_market_signal_mode"]
+        except Exception:
+            out["wave_market_signal_mode"] = DEFAULTS["wave_market_signal_mode"]
+        # v0076: v0070 stored 700ms, which was too strict for 144 WS books.
+        # Raise old/lower values to the safer audited default, but keep higher manual values.
+        try:
+            if float(out.get("ws_book_stale_ms") or 0) < float(DEFAULTS["ws_book_stale_ms"]):
+                out["ws_book_stale_ms"] = DEFAULTS["ws_book_stale_ms"]
+        except Exception:
+            out["ws_book_stale_ms"] = DEFAULTS["ws_book_stale_ms"]
         out["bot_version"] = DEFAULTS["bot_version"]
         return out
 
