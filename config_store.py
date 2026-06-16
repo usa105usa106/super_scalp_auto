@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 DEFAULTS: dict[str, Any] = {
-    "bot_version": "v0078",
+    "bot_version": "v0088",
 
     # secrets are set from Telegram with /api set KEY SECRET. Telegram token stays in ENV.
     "mexc_api_key": "",
@@ -16,7 +16,7 @@ DEFAULTS: dict[str, Any] = {
     # These values are built in and can be changed from Telegram with /set.
     "mexc_rest_base": "https://api.mexc.com",
     "mexc_recv_window": 20000,
-    "mexc_private_rate_limit": 3,
+    "mexc_private_rate_limit": 10,
     "mexc_public_timeout": 6.0,
     "mexc_private_timeout": 15.0,
     "mexc_strict_leverage": False,
@@ -105,7 +105,7 @@ DEFAULTS: dict[str, Any] = {
     "max_entry_maker_fee_rate": 0.0,
     "max_entry_taker_fee_rate": 0.0,
     "fee_guard_ignore_symbol": True,
-    "trade_profile": "wave_price_tsunami_v0078",
+    "trade_profile": "wave_price_tsunami_v0088",
     "edge_filter_enabled": False,
     "entry_top_imbalance_ratio": 1.15,
     "entry_microprice_min_ticks": 0.10,
@@ -162,13 +162,14 @@ DEFAULTS: dict[str, Any] = {
     "wave_close_mode": "market",
     "wave_entry_post_only": False,
     "wave_entry_order_lifetime_ms": 450,
-    # v0078: aggressive entry must not wait in queue. Pick an existing book
+    # v0088: aggressive entry must not wait in queue. Pick an existing book
     # level with enough cumulative liquidity, place a normal LIMIT there,
     # wait briefly, then cancel leftovers.
     "wave_entry_book_sweep_levels": 5,
     "wave_entry_liquidity_multiplier": 1.0,
     "wave_entry_max_sweep_ticks": 3.0,
-    "wave_min_filled_positions": 3,
+    "wave_min_filled_positions": 1,
+    "wave_require_full_basket": False,
     "wave_cooldown_after_cycle_sec": 20.0,
     "wave_require_leader_confirmation": False,
     "wave_leader_symbols": "BTC_USDT,SOL_USDT,ETH_USDT",
@@ -178,25 +179,43 @@ DEFAULTS: dict[str, Any] = {
     "wave_quality_score_required": 2,
     "wave_fee_target_multiplier": 2.4,
     "wave_fee_profit_buffer_usdt": 0.05,
-    "wave_parallel_open": False,
-    "wave_open_batch_gap_ms": 1000,
+    "wave_parallel_open": True,
+    "wave_open_batch_gap_ms": 0,
     "wave_open_retry_delay_sec": 2.0,
     "wave_open_retry_rounds": 4,
     "wave_fill_topup_enabled": True,
     "wave_fill_topup_rounds": 5,
     "wave_open_max_attempts_multiplier": 5.0,
+    # v0088: select reserve candidates and scale NET targets if MEXC fills only part of the basket.
+    "wave_open_reserve_count": 12,
+    "wave_partial_target_scaling": True,
+    "wave_partial_min_target_usdt": 0.01,
+    # v0088: REAL NET already includes fees. Keep Tsunami +$0.10 as +$0.10 net,
+    # do not bump it to +$0.12 just because MEXC reported entry fees.
+    "wave_fee_adjust_target_enabled": False,
 
-    # v0078 Price Tsunami mode: global 10s price vote, clean early/normal/tsunami rules.
+    # v0088 Price Tsunami mode: global 10s price vote, clean early/normal/tsunami rules.
     # Count how many ALL active zero-fee coins rose/fell over 10 seconds, then use 60-second
     # dominance growth to catch an early market wave.
     "wave_price_vote_enabled": True,
-    # v0078: market signal mode switch. all_zero_total keeps the current
+    # v0088: market signal mode switch. all_zero_total keeps the current
     # full zero-fee universe vote. top10_leaders uses the 10 most liquid
     # non-stable zero-fee USDT leaders for direction; trade entries still
     # use the full zero-fee universe. TOP10 rules: 7/10 NORMAL,
     # 7/10 + +2 leaders over 60s EARLY, 8/10 TSUNAMI.
     "wave_market_signal_mode": "all_zero_total",  # all_zero_total | top10_leaders
     "wave_top10_leader_count": 10,
+    # v0088: controlled TOP15 leader window. Primary TOP10 remains the real
+    # liquid leaders; next 5 are temporary reserves only while a primary leader
+    # has stale/no-fresh price. When the primary leader is fresh again, it
+    # automatically returns and the reserve drops out.
+    "wave_top10_reserve_count": 5,
+    "wave_top10_fresh_pool_count": 15,
+    "wave_top10_prefer_fresh": True,
+    # REST repair is optional now; default signal repair uses top15 scan data,
+    # not top30 substitution and not private/API-heavy REST repairs.
+    "wave_top10_rest_refresh_enabled": False,
+    "wave_top10_rest_refresh_limit": 0,
     "wave_top10_normal_count": 7,
     "wave_top10_tsunami_count": 8,
     "wave_top10_accel_count": 2,
@@ -206,7 +225,7 @@ DEFAULTS: dict[str, Any] = {
     "wave_price_min_move_pct": 0.015,
     "wave_accel_lookback_sec": 60.0,
     "wave_accel_trigger_pct": 15.0,
-    # v0078: signal must HOLD, not just flash for one scan tick.
+    # v0088: signal must HOLD, not just flash for one scan tick.
     # Example: Early requires current side >=65% AND +15p.p. growth.
     # Stable entry requires 4 of last 5 hold samples over about 10 seconds.
     "wave_signal_hold_checks": 5,
@@ -267,7 +286,7 @@ DEFAULTS: dict[str, Any] = {
     "telegram_panel_chat_id": 0,
     "telegram_panel_message_id": 0,
     "telegram_panel_mode": "main",  # main | settings | symbols | api
-    # v0078 clean panel lifecycle: edit one panel every 5s, rotate once per 10m.
+    # v0088 clean panel lifecycle: edit one panel every 5s, rotate once per 10m.
     "telegram_panel_message_ids": [],
     "telegram_panel_created_ts": 0.0,
     "telegram_panel_cycle_sec": 600.0,
@@ -318,7 +337,7 @@ WAVE_HUNTER_PROFILE_V0032: dict[str, Any] = {
     "daily_loss_limit_usdt": 999.0,
     "switch_score_improvement_pct": 5.0,
     "min_symbol_hold_sec": 5.0,
-    "mexc_private_rate_limit": 3,
+    "mexc_private_rate_limit": 10,
     "mexc_strict_leverage": False,
     "mexc_set_leverage_on_entry": False,
     "real_pnl_enabled": True,
@@ -330,7 +349,7 @@ WAVE_HUNTER_PROFILE_V0032: dict[str, Any] = {
     "max_entry_maker_fee_rate": 0.0,
     "max_entry_taker_fee_rate": 0.0,
     "fee_guard_ignore_symbol": True,
-    "trade_profile": "wave_price_tsunami_v0078",
+    "trade_profile": "wave_price_tsunami_v0088",
     "edge_filter_enabled": False,
     "entry_top_imbalance_ratio": 1.15,
     "entry_microprice_min_ticks": 0.10,
@@ -384,13 +403,14 @@ WAVE_HUNTER_PROFILE_V0032: dict[str, Any] = {
     "wave_close_mode": "market",
     "wave_entry_post_only": False,
     "wave_entry_order_lifetime_ms": 450,
-    # v0078: aggressive entry must not wait in queue. Pick an existing book
+    # v0088: aggressive entry must not wait in queue. Pick an existing book
     # level with enough cumulative liquidity, place a normal LIMIT there,
     # wait briefly, then cancel leftovers.
     "wave_entry_book_sweep_levels": 5,
     "wave_entry_liquidity_multiplier": 1.0,
     "wave_entry_max_sweep_ticks": 3.0,
-    "wave_min_filled_positions": 3,
+    "wave_min_filled_positions": 1,
+    "wave_require_full_basket": False,
     "wave_cooldown_after_cycle_sec": 20.0,
     "wave_require_leader_confirmation": False,
     "wave_leader_symbols": "BTC_USDT,SOL_USDT,ETH_USDT",
@@ -400,25 +420,43 @@ WAVE_HUNTER_PROFILE_V0032: dict[str, Any] = {
     "wave_quality_score_required": 2,
     "wave_fee_target_multiplier": 2.4,
     "wave_fee_profit_buffer_usdt": 0.05,
-    "wave_parallel_open": False,
-    "wave_open_batch_gap_ms": 1000,
+    "wave_parallel_open": True,
+    "wave_open_batch_gap_ms": 0,
     "wave_open_retry_delay_sec": 2.0,
     "wave_open_retry_rounds": 4,
     "wave_fill_topup_enabled": True,
     "wave_fill_topup_rounds": 5,
     "wave_open_max_attempts_multiplier": 5.0,
+    # v0088: select reserve candidates and scale NET targets if MEXC fills only part of the basket.
+    "wave_open_reserve_count": 12,
+    "wave_partial_target_scaling": True,
+    "wave_partial_min_target_usdt": 0.01,
+    # v0088: REAL NET already includes fees. Keep Tsunami +$0.10 as +$0.10 net,
+    # do not bump it to +$0.12 just because MEXC reported entry fees.
+    "wave_fee_adjust_target_enabled": False,
 
-    # v0078 Price Tsunami mode: global 10s price vote, clean early/normal/tsunami rules.
+    # v0088 Price Tsunami mode: global 10s price vote, clean early/normal/tsunami rules.
     # Count how many ALL active zero-fee coins rose/fell over 10 seconds, then use 60-second
     # dominance growth to catch an early market wave.
     "wave_price_vote_enabled": True,
-    # v0078: market signal mode switch. all_zero_total keeps the current
+    # v0088: market signal mode switch. all_zero_total keeps the current
     # full zero-fee universe vote. top10_leaders uses the 10 most liquid
     # non-stable zero-fee USDT leaders for direction; trade entries still
     # use the full zero-fee universe. TOP10 rules: 7/10 NORMAL,
     # 7/10 + +2 leaders over 60s EARLY, 8/10 TSUNAMI.
     "wave_market_signal_mode": "all_zero_total",  # all_zero_total | top10_leaders
     "wave_top10_leader_count": 10,
+    # v0088: controlled TOP15 leader window. Primary TOP10 remains the real
+    # liquid leaders; next 5 are temporary reserves only while a primary leader
+    # has stale/no-fresh price. When the primary leader is fresh again, it
+    # automatically returns and the reserve drops out.
+    "wave_top10_reserve_count": 5,
+    "wave_top10_fresh_pool_count": 15,
+    "wave_top10_prefer_fresh": True,
+    # REST repair is optional now; default signal repair uses top15 scan data,
+    # not top30 substitution and not private/API-heavy REST repairs.
+    "wave_top10_rest_refresh_enabled": False,
+    "wave_top10_rest_refresh_limit": 0,
     "wave_top10_normal_count": 7,
     "wave_top10_tsunami_count": 8,
     "wave_top10_accel_count": 2,
@@ -428,7 +466,7 @@ WAVE_HUNTER_PROFILE_V0032: dict[str, Any] = {
     "wave_price_min_move_pct": 0.015,
     "wave_accel_lookback_sec": 60.0,
     "wave_accel_trigger_pct": 15.0,
-    # v0078: signal must HOLD, not just flash for one scan tick.
+    # v0088: signal must HOLD, not just flash for one scan tick.
     # Example: Early requires current side >=65% AND +15p.p. growth.
     # Stable entry requires 4 of last 5 hold samples over about 10 seconds.
     "wave_signal_hold_checks": 5,
@@ -518,7 +556,12 @@ class ConfigStore:
                     out["mexc_set_leverage_on_entry"] = DEFAULTS["mexc_set_leverage_on_entry"]
                 if bool(data.get("mexc_strict_leverage", True)) is True:
                     out["mexc_strict_leverage"] = DEFAULTS["mexc_strict_leverage"]
-                if int(float(data.get("mexc_private_rate_limit", 18))) > DEFAULTS["mexc_private_rate_limit"]:
+                # v0088: order entry is batched; do not inherit the old ultra-low 3/2s
+                # private limiter because it makes a 5-slot basket open sequentially.
+                old_private_limit = int(float(data.get("mexc_private_rate_limit", DEFAULTS["mexc_private_rate_limit"])))
+                if old_private_limit < DEFAULTS["mexc_private_rate_limit"]:
+                    out["mexc_private_rate_limit"] = DEFAULTS["mexc_private_rate_limit"]
+                elif old_private_limit > DEFAULTS["mexc_private_rate_limit"]:
                     out["mexc_private_rate_limit"] = DEFAULTS["mexc_private_rate_limit"]
         except Exception:
             pass
@@ -533,7 +576,7 @@ class ConfigStore:
         except Exception:
             pass
 
-        # v0078 rollback safety: never inherit broken mirror-era Telegram behavior from old settings.
+        # v0088 rollback safety: never inherit broken mirror-era Telegram behavior from old settings.
         # Do not reset valid user-facing UI settings on every load: Settings has Panel 5s/10s
         # buttons, so telegram_live_update_sec must persist after the user taps them.
         out["telegram_delete_command_messages"] = False
@@ -553,20 +596,66 @@ class ConfigStore:
             out["telegram_panel_cycle_sec"] = DEFAULTS["telegram_panel_cycle_sec"]
         out["telegram_panel_refresh_mode"] = "edit_rotate"
         out["stop_on_api_errors"] = 999
-        # v0078 UI default: the live toggle starts from ALL total after upgrade.
+        # v0088 UI default: the live toggle starts from ALL total after upgrade.
         # The user can switch to TOP10 with one tap on the live panel.
         try:
             if str(data.get("bot_version") or "") != DEFAULTS["bot_version"] and str(data.get("trade_profile") or "") != "custom":
                 out["wave_market_signal_mode"] = DEFAULTS["wave_market_signal_mode"]
         except Exception:
             out["wave_market_signal_mode"] = DEFAULTS["wave_market_signal_mode"]
-        # v0078: v0070 stored 700ms, which was too strict for 144 WS books.
+        # v0088: v0070 stored 700ms, which was too strict for 144 WS books.
         # Raise old/lower values to the safer audited default, but keep higher manual values.
         try:
             if float(out.get("ws_book_stale_ms") or 0) < float(DEFAULTS["ws_book_stale_ms"]):
                 out["ws_book_stale_ms"] = DEFAULTS["ws_book_stale_ms"]
         except Exception:
             out["ws_book_stale_ms"] = DEFAULTS["ws_book_stale_ms"]
+        # v0088: do not auto-kill a partial basket. If a stored v0080 config
+        # requires a full basket, relax it so partial fills are managed to profit
+        # while the opener/top-up logic keeps trying to reach the target slots.
+        try:
+            if str(data.get("bot_version") or "") != DEFAULTS["bot_version"] and str(data.get("trade_profile") or "") != "custom":
+                out["wave_require_full_basket"] = DEFAULTS["wave_require_full_basket"]
+                out["wave_min_filled_positions"] = DEFAULTS["wave_min_filled_positions"]
+                out["wave_parallel_open"] = DEFAULTS["wave_parallel_open"]
+                out["wave_open_batch_gap_ms"] = DEFAULTS["wave_open_batch_gap_ms"]
+                out["wave_open_reserve_count"] = DEFAULTS["wave_open_reserve_count"]
+                out["wave_partial_target_scaling"] = DEFAULTS["wave_partial_target_scaling"]
+                out["wave_partial_min_target_usdt"] = DEFAULTS["wave_partial_min_target_usdt"]
+                out["wave_fee_adjust_target_enabled"] = DEFAULTS["wave_fee_adjust_target_enabled"]
+        except Exception:
+            out["wave_require_full_basket"] = DEFAULTS["wave_require_full_basket"]
+            out["wave_min_filled_positions"] = DEFAULTS["wave_min_filled_positions"]
+            out["wave_open_reserve_count"] = DEFAULTS["wave_open_reserve_count"]
+            out["wave_partial_target_scaling"] = DEFAULTS["wave_partial_target_scaling"]
+            out["wave_fee_adjust_target_enabled"] = DEFAULTS["wave_fee_adjust_target_enabled"]
+
+        # v0088: if the user did not make a custom profile, disable the old fee target bump.
+        # REAL NET TP is already after fees; fee-aware bump turned Tsunami +$0.10 into about +$0.12.
+        try:
+            if str(data.get("bot_version") or "") != DEFAULTS["bot_version"] and str(data.get("trade_profile") or "") != "custom":
+                out["wave_fee_adjust_target_enabled"] = DEFAULTS["wave_fee_adjust_target_enabled"]
+                out["wave_open_reserve_count"] = DEFAULTS["wave_open_reserve_count"]
+                out["wave_partial_target_scaling"] = DEFAULTS["wave_partial_target_scaling"]
+                out["wave_partial_min_target_usdt"] = DEFAULTS["wave_partial_min_target_usdt"]
+        except Exception:
+            out["wave_fee_adjust_target_enabled"] = DEFAULTS["wave_fee_adjust_target_enabled"]
+
+        # v0088: migrate non-custom configs to the controlled TOP15 reserve model.
+        # This removes the older top30-style replacement and disables REST repair by default.
+        try:
+            if str(data.get("bot_version") or "") != DEFAULTS["bot_version"] and str(data.get("trade_profile") or "") != "custom":
+                out["wave_top10_reserve_count"] = DEFAULTS["wave_top10_reserve_count"]
+                out["wave_top10_fresh_pool_count"] = DEFAULTS["wave_top10_fresh_pool_count"]
+                out["wave_top10_prefer_fresh"] = DEFAULTS["wave_top10_prefer_fresh"]
+                out["wave_top10_rest_refresh_enabled"] = DEFAULTS["wave_top10_rest_refresh_enabled"]
+                out["wave_top10_rest_refresh_limit"] = DEFAULTS["wave_top10_rest_refresh_limit"]
+        except Exception:
+            out["wave_top10_reserve_count"] = DEFAULTS["wave_top10_reserve_count"]
+            out["wave_top10_fresh_pool_count"] = DEFAULTS["wave_top10_fresh_pool_count"]
+            out["wave_top10_rest_refresh_enabled"] = DEFAULTS["wave_top10_rest_refresh_enabled"]
+            out["wave_top10_rest_refresh_limit"] = DEFAULTS["wave_top10_rest_refresh_limit"]
+
         out["bot_version"] = DEFAULTS["bot_version"]
         return out
 

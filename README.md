@@ -1,116 +1,51 @@
-# MEXC Micro Maker Bot — v0078 Audited Runtime Stable
+# MEXC Micro Maker Bot — v0088 TOP15 Reserve Leader-Set Guard
 
-Clean rollback branch based on v0069, with no Mirror Lab / no reverse-bot code.
+## Что изменено в v0088
 
-## Fixes in v0078
+- Добавлен guard для TOP15 reserve: если из-за stale/no-fresh меняется выбранная десятка лидеров, бот сбрасывает 60s acceleration/hold history. Это убирает ложный +2 leader acceleration от самой замены монет, а не от движения рынка.
 
-- ALL and TOP10 signal modes preserved:
-  - `all_zero_total`
-  - `top10_leaders`
-- TOP10 rules preserved:
-  - 7/10 = NORMAL
-  - 7/10 + +2 leaders over 60s = EARLY
-  - 8/10 = TSUNAMI
-  - entries are still picked from the full zero-fee universe.
-- Runtime scan tick watchdog:
-  - one stuck scan/API tick cannot freeze the whole strategy loop.
-  - default `runtime_loop_tick_timeout_sec = 22`.
-- Private API throttling:
-  - balance check no longer runs every 100ms loop tick.
-  - open positions check no longer runs every 100ms loop tick.
-  - active basket management now checks all open positions through one cached snapshot instead of per-symbol polling.
-  - active basket equity snapshot is cached briefly, so `account/assets` is not requested every 450ms manage tick.
-  - position margin balance read is cached briefly.
-- WS freshness relaxed for the full 144-symbol universe:
-  - default `ws_book_stale_ms = 1200` instead of `700`.
-  - older stored values below 1200 are lifted to 1200 on load.
-- Doctor command now shows loop tick count, heartbeat age, last tick ms, timeout count.
-- Panel lifecycle preserved:
-  - Start sends one fresh panel down.
-  - Running edits that panel every 5 seconds.
-  - Every 10 minutes old known panels are deleted and one fresh panel is sent down.
-- `/log_full` sends TXT export.
-- `/log_tail` remains available manually but is hidden from the Telegram command menu.
+- Версия везде обновлена до `v0088`, profile: `wave_price_tsunami_v0088`.
+- Убрана сырая схема `TOP10 -> top30 replacement`.
+- Убрана зависимость от REST-repair по умолчанию для TOP10 сигнала.
+- `TOP10 leaders` теперь работает через контролируемое окно `TOP15`:
+  - первые 10 монет = основные лидеры;
+  - следующие 5 монет = резерв;
+  - если 1–5 основных лидеров получили `stale/no fresh`, бот временно добирает свежих из резерва;
+  - если основной лидер ожил, он автоматически возвращается в TOP10 на следующем скане, а резервная монета выпадает.
+- Если свежих монет не хватает даже в TOP15, недостающие основные лидеры остаются `neutral/stale`, и сигнал честно ждёт.
+- Все фиксы v0084/v0085 сохранены: partial target scaling, no fee-bump, Last closed отдельно, чистое command menu.
 
-- Telegram UI cleanup v0078:
-  - Telegram command menu is reduced to `/start`, `/scan`, `/balance`, `/status`, `/help`.
-  - live inline panel keeps trading actions, Price Scan, service tools, and one ALL total/TOP10 signal toggle.
-  - default signal mode is `all_zero_total`; one tap switches the live button to TOP10, another tap returns to ALL total.
-  - Settings screen is balanced: size, basket, direction, targets, signal thresholds, hold and panel refresh are visible as buttons; rare advanced commands `/set`, `/symbols`, `/market_mode` still work manually.
-  - Settings / Universe / API / Doctor / Log Full are sent as separate messages, so the 5s live scan refresh cannot overwrite them.
-
-## Tests run
-
-```bash
-python -m py_compile *.py tests/*.py
-python tests/no_mirror_test.py
-python tests/top10_fire_test.py
-python tests/panel_lifecycle_test.py
-python tests/private_throttle_test.py
-python tests/active_manage_throttle_test.py
-python tests/loop_timeout_test.py
-python tests/callback_audit.py
-```
-
-Expected:
+## TOP10 freshness logic
 
 ```text
-NO_MIRROR_TEST_OK v0078
-TOP10_FIRE_TEST_OK v0078
-PANEL_LIFECYCLE_TEST_OK v0078
-PRIVATE_THROTTLE_TEST_OK v0078
-ACTIVE_MANAGE_THROTTLE_TEST_OK v0078
-LOOP_TIMEOUT_TEST_OK v0078
-CALLBACK_AUDIT_OK ... v0078
+Primary TOP10:  L0 L1 L2 L3 L4 L5 L6 L7 L8 L9
+Reserve +5:     L10 L11 L12 L13 L14
+
+Если L1, L4, L8 stale:
+Selected TOP10: L0 L2 L3 L5 L6 L7 L9 L10 L11 L12
+
+Если L1 ожил:
+Selected TOP10: L0 L1 L2 L3 L5 L6 L7 L9 L10 L11
 ```
 
-## UI cleanup v0078
+То есть резерв используется только временно. Основной TOP10 всегда имеет приоритет, когда данные снова свежие.
 
-Telegram bot command menu contains only:
-
-```text
-/start
-/scan
-/balance
-/status
-/help
-```
-
-Live inline panel contains:
+## Tests
 
 ```text
-▶️ Start Tsunami | ⏸ Stop/Pause
-❌ Close All     | 🔍 Price Scan
-✅ Signal: ALL total   # tap -> TOP10
-📄 Log Full      | 🩺 Doctor
-⚙️ Settings      | 📈 Universe
-🔑 API
-```
-
-When switched:
-
-```text
-✅ Signal: TOP10       # tap -> ALL total
-```
-
-Balance/status/help are not duplicated in the inline panel. Service tools stay as inline buttons, not bot-menu commands, and open in separate messages.
-
-
-## Settings screen v0078
-
-Inline Settings now contains a medium set of useful controls:
-
-```text
-Signal ALL/TOP10
-Dir BOTH / LONG / SHORT
-Size 10 / 15 / 20%
-Basket 3 / 5
-NET +$0.03 / +$0.05
-Tsunami +$0.10 / +$0.15
-Early 60 / 65%
-Normal 70 / 75%
-Accel 10 / 15 p.p.
-Hold 3/5 / 4/5
-Panel 5s / 10s
-Back to Live
+ACTIVE_MANAGE_THROTTLE_TEST_OK v0088
+BATCH_OPEN_SMOKE_TEST_OK v0088
+CALLBACK_AUDIT_OK callbacks=36 v0088
+COMMAND_MENU_CLEANUP_TEST_OK v0088
+LOOP_TIMEOUT_TEST_OK v0088
+NO_MIRROR_TEST_OK v0088
+PANEL_LIFECYCLE_TEST_OK v0088
+PARTIAL_TARGET_SCALING_TEST_OK v0088
+PRIVATE_THROTTLE_TEST_OK v0088
+SETTINGS_PERSIST_TEST_OK v0088
+TOP10_FIRE_TEST_OK v0088
+TOP15_RESERVE_REPLACEMENT_TEST_OK v0088
+TOP15_SELECTION_CHANGE_GUARD_TEST_OK v0088
+UI_TEXT_AUDIT_OK v0088
+WAVE_PARTIAL_BATCH_OPEN_TEST_OK v0088
 ```

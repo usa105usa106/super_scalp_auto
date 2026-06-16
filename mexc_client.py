@@ -657,6 +657,28 @@ class MexcFuturesClient:
             raise RuntimeError(f"empty position volume: {position}")
         return await self.place_order(position.get("symbol"), side_code, 5, vol, 0, leverage, open_type)
 
+    async def cancel_orders(self, order_ids: list[str] | tuple[str, ...], symbol: str | None = None) -> dict[str, Any]:
+        """Cancel several active orders in one private request.
+
+        MEXC futures cancel endpoint accepts a JSON list of order ids. Batched
+        wave entry uses this so a 5-slot basket does not spend five extra
+        private requests just canceling leftovers after the entry TTL.
+        """
+        body: list[int | str] = []
+        seen: set[str] = set()
+        for raw in order_ids or []:
+            oid = str(raw or "").split(":", 1)[0].strip()
+            if not oid or oid in seen:
+                continue
+            seen.add(oid)
+            body.append(int(oid) if oid.isdigit() else oid)
+        if not body:
+            return {"ok": False, "reason": "empty order_ids"}
+        log_event("mexc_cancel_orders_request", body=body, symbol=self.contract_id(symbol) if symbol else "")
+        res = await self.private("POST", "/api/v1/private/order/cancel", body=body)
+        log_event("mexc_cancel_orders_response", body=body, symbol=self.contract_id(symbol) if symbol else "", response=res)
+        return res
+
     async def cancel_order(self, order_id: str, symbol: str | None = None) -> dict[str, Any]:
         oid = str(order_id or "").split(":", 1)[0].strip()
         if not oid:
@@ -666,11 +688,7 @@ class MexcFuturesClient:
         # (List<Long>, max 50). v0018 sent {"orderId": id, "symbol": ...}, which MEXC
         # answers with code 600 Parameter error. That left maker entry orders alive and
         # reserved margin, so the next loops had almost no available balance.
-        body: list[int | str] = [int(oid) if oid.isdigit() else oid]
-        log_event("mexc_cancel_order_request", body=body, symbol=self.contract_id(symbol) if symbol else "")
-        res = await self.private("POST", "/api/v1/private/order/cancel", body=body)
-        log_event("mexc_cancel_order_response", body=body, symbol=self.contract_id(symbol) if symbol else "", response=res)
-        return res
+        return await self.cancel_orders([oid], symbol)
 
     async def cancel_all_orders(self, symbol: str | None = None) -> dict[str, Any]:
         results, errors = [], []

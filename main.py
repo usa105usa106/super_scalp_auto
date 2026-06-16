@@ -31,7 +31,7 @@ UI_BG_TASKS: dict[str, asyncio.Task] = {}
 def spawn_ui_task(coro, name: str = "ui_bg") -> asyncio.Task:
     """Run slow Telegram/API actions outside the callback handler so buttons do not stick.
 
-    v0078: one background UI task per action name. Repeated button taps must not
+    v0088: one background UI task per action name. Repeated button taps must not
     stack duplicate scans/fee checks/close-all operations in the background.
     If the same action is already running, keep it and close the unused coroutine.
     """
@@ -133,7 +133,7 @@ def signal_toggle_button() -> InlineKeyboardButton:
 def main_menu() -> InlineKeyboardMarkup:
     """Live inline panel: only trading controls plus operational tool screens.
 
-    v0078 UI rule:
+    v0088 UI rule:
     - Telegram command menu keeps only: /start, /scan, /balance, /status, /help.
     - Live panel has one ALL total/TOP10 signal toggle. Default: ALL total.
     - Tool screens (Settings/Universe/API/Doctor/Log) are sent as separate
@@ -169,36 +169,43 @@ def command_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
-async def sync_telegram_command_menu(app: Application) -> None:
+async def sync_telegram_command_menu(
+    app: Application,
+    chat_id: int | None = None,
+    user_language_code: str | None = None,
+) -> None:
     """Force-clean Telegram's native slash-command menu.
 
-    v0078: Telegram can keep old commands in more specific BotCommand scopes
-    (all-private chats or a concrete chat) even when the default command list is
-    changed. We therefore delete the old scopes first, then install exactly the
-    5 core commands. Inline buttons are not touched.
+    v0088 fix: Telegram keeps command menus separately by scope AND by
+    language_code. The old long menu on Kevin's screenshot was a stale
+    Russian/language-specific command list, so v0078 (default scope only) did
+    not replace it visually. Here we delete and re-set exactly 5 commands for:
+    - default scope
+    - all private chats
+    - group/admin scopes
+    - saved panel chat scope and the current /start chat scope
+    - language-independent list plus ru/en and the user's current language.
+
+    Inline buttons are not touched.
     """
     commands = core_bot_commands()
     bot = app.bot
 
-    # Delete the default list first. On older stubs this method may be absent.
-    delete_cmds = getattr(bot, "delete_my_commands", None)
-    if delete_cmds is not None:
-        try:
-            await delete_cmds()
-        except TelegramError as e:
-            log_error("telegram_command_menu_delete_default_error", e)
-        except Exception as e:
-            log_error("telegram_command_menu_delete_default_unexpected", e)
-
-    # Clear common Telegram command scopes that can override the default list.
     try:
         import telegram as tg  # imported dynamically so offline tests can stub it
     except Exception:
         tg = None
 
-    scopes: list[Any] = []
+    def _scope_key(scope: Any) -> str:
+        if scope is None:
+            return "default"
+        return f"{scope.__class__.__name__}:{getattr(scope, 'chat_id', '')}:{repr(scope)}"
+
+    # Build scopes. None means the BotCommandScopeDefault/default list.
+    scopes: list[Any | None] = [None]
     if tg is not None:
         for name in (
+            "BotCommandScopeDefault",
             "BotCommandScopeAllPrivateChats",
             "BotCommandScopeAllGroupChats",
             "BotCommandScopeAllChatAdministrators",
@@ -210,43 +217,77 @@ async def sync_telegram_command_menu(app: Application) -> None:
                 except Exception:
                     pass
         chat_scope_cls = getattr(tg, "BotCommandScopeChat", None)
-        chat_id = int(STORE.load().get("telegram_panel_chat_id") or 0)
-        if chat_scope_cls is not None and chat_id:
-            try:
-                scopes.append(chat_scope_cls(chat_id=chat_id))
-            except Exception:
-                pass
+        for cid in (int(STORE.load().get("telegram_panel_chat_id") or 0), int(chat_id or 0)):
+            if chat_scope_cls is not None and cid:
+                try:
+                    scopes.append(chat_scope_cls(chat_id=cid))
+                except Exception:
+                    pass
 
+    # Deduplicate scopes but preserve order.
+    seen_scopes: set[str] = set()
+    unique_scopes: list[Any | None] = []
+    for scope in scopes:
+        key = _scope_key(scope)
+        if key not in seen_scopes:
+            seen_scopes.add(key)
+            unique_scopes.append(scope)
+
+    # Telegram command menus can be language-specific. Russian Telegram clients
+    # often prefer language_code='ru', so clean that explicitly.
+    languages: list[str | None] = [None, "ru", "en"]
+    if user_language_code:
+        lc = str(user_language_code).strip().lower()
+        if lc:
+            languages.append(lc[:2])
+    seen_langs: set[str] = set()
+    unique_langs: list[str | None] = []
+    for lang in languages:
+        key = lang or ""
+        if key not in seen_langs:
+            seen_langs.add(key)
+            unique_langs.append(lang)
+
+    delete_cmds = getattr(bot, "delete_my_commands", None)
     if delete_cmds is not None:
-        for scope in scopes:
-            try:
-                await delete_cmds(scope=scope)
-            except TelegramError as e:
-                log_error("telegram_command_menu_delete_scope_error", e, scope=str(scope))
-            except Exception as e:
-                log_error("telegram_command_menu_delete_scope_unexpected", e, scope=str(scope))
+        for scope in unique_scopes:
+            for lang in unique_langs:
+                kwargs: dict[str, Any] = {}
+                if scope is not None:
+                    kwargs["scope"] = scope
+                if lang:
+                    kwargs["language_code"] = lang
+                try:
+                    await delete_cmds(**kwargs)
+                except TelegramError as e:
+                    log_error("telegram_command_menu_delete_error", e, scope=str(scope), language_code=lang or "")
+                except Exception as e:
+                    log_error("telegram_command_menu_delete_unexpected", e, scope=str(scope), language_code=lang or "")
 
-    # Install exactly the visible native menu: /start, /scan, /balance, /status, /help.
-    try:
-        await bot.set_my_commands(commands)
-        log_event("telegram_command_menu_synced", commands=[getattr(c, "command", str(c)) for c in commands])
-    except TelegramError as e:
-        log_error("telegram_command_menu_set_default_error", e)
-    except Exception as e:
-        log_error("telegram_command_menu_set_default_unexpected", e)
-
-    # In private/chat-specific scopes, set the same 5-command list too. This makes
-    # cleanup visible immediately even if Telegram previously had a private scope.
     set_cmds = getattr(bot, "set_my_commands", None)
     if set_cmds is not None:
-        for scope in scopes:
-            try:
-                await set_cmds(commands, scope=scope)
-            except TelegramError as e:
-                log_error("telegram_command_menu_set_scope_error", e, scope=str(scope))
-            except Exception as e:
-                log_error("telegram_command_menu_set_scope_unexpected", e, scope=str(scope))
-
+        set_count = 0
+        for scope in unique_scopes:
+            for lang in unique_langs:
+                kwargs: dict[str, Any] = {}
+                if scope is not None:
+                    kwargs["scope"] = scope
+                if lang:
+                    kwargs["language_code"] = lang
+                try:
+                    await set_cmds(commands, **kwargs)
+                    set_count += 1
+                except TelegramError as e:
+                    log_error("telegram_command_menu_set_error", e, scope=str(scope), language_code=lang or "")
+                except Exception as e:
+                    log_error("telegram_command_menu_set_unexpected", e, scope=str(scope), language_code=lang or "")
+        log_event(
+            "telegram_command_menu_synced_v0088",
+            commands=[getattr(c, "command", str(c)) for c in commands],
+            scopes=len(unique_scopes),
+            languages=[lang or "default" for lang in unique_langs],
+            set_count=set_count,
+        )
 
 async def delete_later(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int, delay: float = 1.5) -> None:
     try:
@@ -344,7 +385,7 @@ def settings_text() -> str:
         mode_txt = "TOP10 — направление считают 10 самых сильных/ликвидных non-stable монет"
     direction = str(s.get("direction_mode") or "both").upper()
     return (
-        f"⚙️ Settings {s.get('bot_version', 'v0078')}\n\n"
+        f"⚙️ Settings {s.get('bot_version', 'v0088')}\n\n"
         "Оставил средний вариант: не простыня как раньше, но и не пусто.\n\n"
         "СИГНАЛ\n"
         f"Signal: {mode_txt}\n"
@@ -445,7 +486,7 @@ def settings_menu() -> InlineKeyboardMarkup:
 def symbols_text(engine: MicroMakerEngine | None = None) -> str:
     """Clean Symbols screen.
 
-    v0078: show what matters first: raw zero-fee count, blocked count,
+    v0088: show what matters first: raw zero-fee count, blocked count,
     ignored count, trade universe, and current scan readiness. Long explanatory
     text is removed from the main Telegram card.
     """
@@ -491,7 +532,7 @@ def symbols_text(engine: MicroMakerEngine | None = None) -> str:
     if str(s.get('wave_market_signal_mode') or 'all_zero_total') == 'top10_leaders':
         leaders_line = "TOP10 leaders: " + (", ".join(leader_symbols[:10]) if leader_symbols else "будут выбраны после scan") + "\n"
     return (
-        f"📈 Symbols / Universe {s.get('bot_version', 'v0078')}\n\n"
+        f"📈 Symbols / Universe {s.get('bot_version', 'v0088')}\n\n"
         "РЕЖИМ\n"
         f"Auto-select: {'ON' if s.get('auto_select_symbols') else 'OFF'}\n"
         f"Signal: {s.get('wave_market_signal_mode', 'all_zero_total')}\n"
@@ -616,7 +657,7 @@ def panel_text(engine: MicroMakerEngine | None = None) -> str:
     normal_tp = float(s.get("wave_normal_target_profit_usdt") or 0.05)
     tsunami_tp = float(s.get("wave_tsunami_target_profit_usdt") or 0.10)
     return (
-        f"🌊 Price Tsunami {s.get('bot_version', 'v0078')}\n"
+        f"🌊 Price Tsunami {s.get('bot_version', 'v0088')}\n"
         "State: STOPPED\n\n"
         "PRICE SCAN 10s: пока нет данных.\n"
         "LONG 0% | SHORT 0% | NEUTRAL 0%\n"
@@ -626,7 +667,7 @@ def panel_text(engine: MicroMakerEngine | None = None) -> str:
         f"Normal: сейчас >=75% стороны → {slots} сделок, 5x, NET +${normal_tp:.2f}\n"
         f"Tsunami: сейчас >=75% и эта же сторона выросла на +15п.п. за 60s → {slots} сделок, 10x, NET +${tsunami_tp:.2f}\n"
         "65/75 — итог сейчас; +15п.п. уже внутри этих процентов.\n"
-        "v0078: сигнал должен держаться 4 из 5 checks за ~10s; один шумовой провал не сбрасывает сигнал.\n\n"
+        "v0088: сигнал должен держаться 4 из 5 checks за ~10s; один шумовой провал не сбрасывает сигнал.\n\n"
         "Stop = пауза, позиции/ордера не трогает. Close All = снести всё.\n"
         "Нажми ▶️ Start Tsunami."
     )
@@ -895,7 +936,7 @@ async def update_live_panel(app: Application, force: bool = False) -> None:
 
 
 async def live_panel_loop(app: Application) -> None:
-    """v0078 clean rollback panel loop.
+    """v0088 clean rollback panel loop.
 
     RUNNING: edit one current scan panel every 5 sec.
     Every 10 min: delete all known scan panels and send one fresh panel down.
@@ -930,6 +971,10 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id if update.effective_chat else None
     if not chat_id:
         return
+    # v0088: force-clean native Telegram slash menu on the actual private chat too.
+    # This fixes stale Russian/language-specific command lists that survive restart.
+    user_lang = getattr(update.effective_user, "language_code", None) if update.effective_user else None
+    await sync_telegram_command_menu(context.application, chat_id=chat_id, user_language_code=user_lang)
     engine = await ensure_engine(context, chat_id)
     # /start should give one clean live panel, not leave duplicate old panels above.
     await delete_all_panels(context.application)
@@ -1037,7 +1082,7 @@ async def preset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     reset_engine_signal_state(engine)
     engine.clear_ignored_symbols()
     slots = int(STORE.load().get("wave_positions") or 5)
-    await reply_tool_message(context, chat_id, f"🌊 Price Tsunami v0078 применён: 10s price-scan, итоговые 65/75% + рост 15п.п., {slots} LONG/SHORT, 5x/10x, REAL NET выход.\n\n" + settings_text(), settings_menu())
+    await reply_tool_message(context, chat_id, f"🌊 Price Tsunami v0088 применён: 10s price-scan, итоговые 65/75% + рост 15п.п., {slots} LONG/SHORT, 5x/10x, REAL NET выход.\n\n" + settings_text(), settings_menu())
 
 
 async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1304,7 +1349,7 @@ async def send_log_full_document(context: ContextTypes.DEFAULT_TYPE, chat_id: in
         await context.bot.send_message(chat_id=chat_id, text=f"📄 /log_full {STORE.load().get('bot_version')}: собираю и отправляю TXT-файл...")
         log_event("log_full_export_requested", chat_id=chat_id)
         path = export_full_log(STORE.load(), engine or ENGINE)
-        caption = f"📄 Full debug log {STORE.load().get('bot_version', 'v0078')}"
+        caption = f"📄 Full debug log {STORE.load().get('bot_version', 'v0088')}"
         with open(path, "rb") as f:
             await asyncio.wait_for(context.bot.send_document(
                 chat_id=chat_id,
@@ -1434,7 +1479,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await install_command_keyboard(context, chat_id)
     s = STORE.load()
     txt = (
-        f"🆘 Price Tsunami Help — {s.get('bot_version', 'v0078')}\n\n"
+        f"🆘 Price Tsunami Help — {s.get('bot_version', 'v0088')}\n\n"
         "Логика торговли:\n"
         "1) Бот держит ALL active zero-fee *_USDT universe, без лимита 250.\n"
         "2) Каждые ~10 секунд сравнивает mid-price каждой монеты.\n"
@@ -1446,7 +1491,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Tsunami: >=75% и рост +15п.п. за 60s → Basket 3/5 по настройке, 10x, tsunami NET TP.\n"
         "TOP10: 7/10 = NORMAL, 7/10 + рост +2 монеты за 60с = EARLY, 8/10 = TSUNAMI. Входы всё равно из полного zero-fee universe.\n"
         "Важно: 65% и 75% — текущий итоговый процент; +15п.п. уже внутри этого значения, это не 65+15.\n"
-        "v0078 HOLD: вход только когда сигнал подтверждён 4 из 5 checks за ~10s; один шумовой провал не сбрасывает сигнал.\n\n"
+        "v0088 HOLD: вход только когда сигнал подтверждён 4 из 5 checks за ~10s; один шумовой провал не сбрасывает сигнал.\n\n"
         "Выбор монет: не самый перегретый топ, а середина 25-60% same-side candidates.\n"
         "Все сделки открываются одной стороной: либо вся корзина LONG, либо вся корзина SHORT. Если MEXC режет быстрые заявки, бот ждёт и повторяет те же слоты, затем добирает заменами.\n"
         "Закрытие: вся корзина по REAL NET equity PnL. Через 10 минут закрывает только ноль/микроплюс; минус не режет, ждёт восстановления.\n\n"
@@ -1472,7 +1517,7 @@ async def _finish_panel_task(
 ) -> None:
     """Execute a slow action and refresh panel afterwards. Used so button callbacks answer instantly.
 
-    v0078: detail screens such as Price Scan should not append the live panel
+    v0088: detail screens such as Price Scan should not append the live panel
     underneath. Slow background actions are deduped and wrapped in a timeout so
     repeated button taps cannot leave endless pending UI tasks.
     """
@@ -1723,7 +1768,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     if chat_id:
-        await context.bot.send_message(chat_id=chat_id, text="ℹ️ Эта старая кнопка больше не используется в v0078. Нажми /start для новой live-панели.")
+        await context.bot.send_message(chat_id=chat_id, text="ℹ️ Эта старая кнопка больше не используется в v0088. Нажми /start для новой live-панели.")
 
 
 async def runtime_watchdog_loop(app: Application) -> None:
