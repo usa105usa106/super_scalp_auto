@@ -78,7 +78,7 @@ class MicroMakerEngine:
         self._last_logged_scan_ts = 0.0
         self.cooldown_until_ts = 0.0
         self.last_trade_closed_ts = 0.0
-        # v0088: private API throttles/cache. The strategy loop can tick every
+        # v0090: private API throttles/cache. The strategy loop can tick every
         # 100ms, but balance/open_positions must not be requested every tick.
         self._balance_cache: dict[str, Any] = {}
         self._balance_cache_ts: float = 0.0
@@ -88,7 +88,7 @@ class MicroMakerEngine:
         self.mid_history: dict[str, list[tuple[float, float, float]]] = {}
         self.wave_candidate_side: str | None = None
         self.wave_candidate_count: int = 0
-        # v0088: market signal hold/stability guard. A one-tick acceleration spike
+        # v0090: market signal hold/stability guard. A one-tick acceleration spike
         # must not fire a basket. The signal is sampled over a time window,
         # so one noisy failed check does not fully reset a valid wave.
         self.wave_signal_hold_key: str | None = None
@@ -101,17 +101,17 @@ class MicroMakerEngine:
         self.wave_signal_mode_last: str = "all_zero_total"
         self.last_wave_vote_rows: list[dict[str, Any]] = []
         self.last_wave_vote_summary: dict[str, Any] = {}
-        # v0088: optional TOP10 leader signal mode. Leaders decide only market
+        # v0090: optional TOP10 leader signal mode. Leaders decide only market
         # direction; entries are still picked from the full zero-fee universe.
         self.last_wave_leader_symbols: list[str] = []
         self.last_wave_leader_vote_rows: list[dict[str, Any]] = []
         self.last_wave_leader_vote_summary: dict[str, Any] = {}
         self.last_wave_leader_diag: dict[str, Any] = {}
-        # v0088: when TOP10 reserve swaps change the actual selected leader set,
+        # v0090: when TOP10 reserve swaps change the actual selected leader set,
         # reset acceleration/hold history so a basket cannot fire from a fake
         # +2 leader acceleration caused only by replacing stale symbols.
         self.wave_top10_selection_key: str = ""
-        # v0088 hotfix: when manual/legacy positions already exist, the wave
+        # v0090 hotfix: when manual/legacy positions already exist, the wave
         # engine must still refresh market scan/vote diagnostics for the live
         # panel. Throttle the informational skip log so 100ms ticks do not spam
         # the full debug log while entries are blocked by those positions.
@@ -237,7 +237,7 @@ class MicroMakerEngine:
     ) -> dict[str, float]:
         """Return the actual NET targets used by the basket manager.
 
-        v0088 real fix: this is not a UI marker. The manager calls this after
+        v0090 real fix: this is not a UI marker. The manager calls this after
         the exchange reports how many positions actually opened. Normal and
         tsunami baskets use the same rule: if MEXC fills only 2/5, the basket
         is managed against 2/5 of the configured REAL NET target instead of
@@ -332,7 +332,7 @@ class MicroMakerEngine:
         # indexes and tokenized tickers without this substring remain allowed.
         if "STOCK" in sym:
             return True
-        # v0088: the account balance/margin shown by MEXC is USDT. Contracts like
+        # v0090: the account balance/margin shown by MEXC is USDT. Contracts like
         # SOL_USDC/BTC_USDC require USDC collateral, so MEXC returns
         # "Balance insufficient" with available=0 even when USDT is free.
         # Basket mode must therefore trade only *_USDT contracts by default.
@@ -401,7 +401,7 @@ class MicroMakerEngine:
     def _select_top10_fresh_leader_vote_rows(self, pool: list[str], s: dict[str, Any], vote_rows: list[dict[str, Any]]) -> tuple[list[str], list[dict[str, Any]], dict[str, Any]]:
         """Pick TOP10 leaders with a controlled top15 reserve window.
 
-        v0088 rule requested by user:
+        v0090 rule requested by user:
         - the primary market signal is the real first TOP10 liquid non-stable leaders;
         - symbols 11-15 are reserves only;
         - if 1-5 primary leaders have stale/no-fresh price, replace them with
@@ -476,15 +476,22 @@ class MicroMakerEngine:
         selected_no_fresh = sum(1 for r in selected_rows if r.get("move_pct") is None)
         raw_rows = [row_for(sym) for sym in primary_symbols]
         raw_no_fresh = sum(1 for r in raw_rows if r.get("move_pct") is None)
+        selected_fresh = max(0, len(selected_rows) - selected_no_fresh)
+        primary_fresh = max(0, len(raw_rows) - raw_no_fresh)
         diag = {
             "top10_raw_symbols": primary_symbols,
+            "top10_primary_symbols": primary_symbols,
             "top10_candidate_symbols": candidate_symbols,
             "top10_reserve_symbols": reserve_symbols,
             "top10_candidate_count": len(candidate_symbols),
             "top10_fresh_pool_count": candidate_n,
+            "top10_primary_count": len(primary_symbols),
+            "top10_primary_fresh": primary_fresh,
             "top10_reserve_count": reserve_n,
             "top10_raw_no_fresh": raw_no_fresh,
+            "top10_primary_stale": raw_no_fresh,
             "top10_selected_no_fresh": selected_no_fresh,
+            "top10_selected_fresh": selected_fresh,
             "top10_stale_replaced": len(reserve_used),
             "top10_reserve_used": len(reserve_used),
             "top10_reserve_used_symbols": reserve_used,
@@ -684,7 +691,7 @@ class MicroMakerEngine:
     ) -> None:
         """Update live account equity snapshot used by the fast Telegram panel.
 
-        v0088: when ttl is provided, reuse the balance cache so an active basket
+        v0090: when ttl is provided, reuse the balance cache so an active basket
         does not call private account/assets on every 450ms manage tick.
         Force is still available for start/close/final PnL reads.
         """
@@ -868,7 +875,7 @@ class MicroMakerEngine:
     async def _ensure_market_ws(self, symbols: list[str], s: dict[str, Any]) -> None:
         """Start/refresh WS subscriptions for fast depth scanning.
 
-        v0088 rule: 0 means ALL. The price vote must be based on the real
+        v0090 rule: 0 means ALL. The price vote must be based on the real
         active zero-fee universe count, not on an arbitrary 250-symbol cap.
         """
         if str(s.get("market_data_mode") or "websocket").lower() != "websocket" or not bool(s.get("ws_depth_enabled")):
@@ -996,7 +1003,7 @@ class MicroMakerEngine:
             self.task = asyncio.create_task(self._run_loop(), name="micro_maker_loop")
             self._log_event("start_success", start_equity=self.stats.start_equity)
             slots = int(self._settings().get("wave_positions") or 5)
-            return f"▶️ Price Tsunami v0088 запущен. Схема: price-scan 10s по активным zero-fee монетам → LONG/SHORT/NEUTRAL проценты → {slots} сделок одной стороной → закрытие всей корзины по REAL NET PnL."
+            return f"▶️ Price Tsunami v0090 запущен. Схема: price-scan 10s по активным zero-fee монетам → LONG/SHORT/NEUTRAL проценты → {slots} сделок одной стороной → закрытие всей корзины по REAL NET PnL."
 
     async def stop(self, close_positions: bool = False) -> str:
         self._log_event("stop_requested", close_positions=close_positions, active_tasks=list(self.active_tasks.keys()))
@@ -1105,7 +1112,7 @@ class MicroMakerEngine:
 
 
     def _top10_accel_lines(self, v: dict[str, Any]) -> tuple[str, str]:
-        # v0088: TOP10 panel must always use a TOP10 denominator. In older
+        # v0090: TOP10 panel must always use a TOP10 denominator. In older
         # builds the wait reason could show confusing text like 8/145 even
         # though the signal was calculated from ten leaders.
         leaders = v.get("leader_symbols") or []
@@ -1131,12 +1138,18 @@ class MicroMakerEngine:
     def _wave_view(self, s: dict[str, Any]) -> dict[str, Any]:
         """One clean view model for Telegram panel/status text."""
         w = dict(self.stats.wave_state or {})
-        if str(s.get("wave_market_signal_mode") or "all_zero_total") == "top10_leaders":
+        signal_mode_cfg = str(s.get("wave_market_signal_mode") or "all_zero_total")
+        if signal_mode_cfg == "top10_leaders":
             summary = dict(getattr(self, "last_wave_leader_vote_summary", {}) or {})
+            # v0090: in TOP10 mode, never let stale full-universe counters from
+            # _refresh_market_scan leak into the panel. TOP10 is the market signal;
+            # full universe is only the entry pool.
+            force_summary_keys = True
         else:
             summary = dict(getattr(self, "last_wave_vote_summary", {}) or {})
+            force_summary_keys = False
         for key in ("active", "price_ready", "no_fresh_price", "long", "short", "neutral", "long_pct", "short_pct", "neutral_pct"):
-            if w.get(key) is None and summary.get(key) is not None:
+            if summary.get(key) is not None and (force_summary_keys or w.get(key) is None):
                 w[key] = summary.get(key)
         mode = str(w.get("mode") or "wait").lower()
         side = str(w.get("side") or "-").upper()
@@ -1215,7 +1228,7 @@ class MicroMakerEngine:
             "selected": selected,
             "opened_symbols": opened_symbols,
             "skip_txt": skip_txt,
-            # v0088: do not show the last closed basket profit as current REAL NET
+            # v0090: do not show the last closed basket profit as current REAL NET
             # when there are no open positions. Keep it separately as last_net.
             "net": (0.0 if opened <= 0 else float(w.get("net") or self.stats.net_equity_pnl or 0.0)),
             "last_net": float(w.get("last_closed_net") if w.get("last_closed_net") is not None else (w.get("net") or self.stats.net_equity_pnl or 0.0)),
@@ -1261,7 +1274,7 @@ class MicroMakerEngine:
     def quick_status_text(self) -> str:
         """Clean live panel for Price Tsunami mode. No REST calls here.
 
-        v0088 UI rule: market scan blocks are ALWAYS visible, even when the
+        v0090 UI rule: market scan blocks are ALWAYS visible, even when the
         basket is already open. Debug/runtime details are kept out of the main
         panel so the Telegram message stays readable.
         """
@@ -1287,7 +1300,7 @@ class MicroMakerEngine:
 
         if v.get("signal_mode") == "top10_leaders":
             accel_long, accel_short = self._top10_accel_lines(v)
-            # v0088 hotfix: quick_status_text uses TOP10 thresholds in the decision text.
+            # v0090 hotfix: quick_status_text uses TOP10 thresholds in the decision text.
             # When the panel is in TOP10 mode this variable must exist even before
             # any scan has populated leader_symbols/active counters.
             top10_total = max(1, int(v.get("top10_leader_count") or len(v.get("leader_symbols") or []) or int(v.get("active") or 0) or 10))
@@ -1386,23 +1399,37 @@ class MicroMakerEngine:
         top10_fresh_line = ""
         if v.get('signal_mode') == 'top10_leaders':
             reserve_used = int(v.get('top10_reserve_used') or v.get('top10_stale_replaced') or 0)
-            stale = int(v.get('no_fresh_price') or 0)
-            if reserve_used > 0 or stale > 0:
-                top10_fresh_line = (
-                    f"TOP15 reserve: used {reserve_used}/{int(v.get('top10_reserve_count') or 5)}; "
-                    f"fresh {v['price_ready']}/{max(1, int(v.get('active') or 10))}"
-                )
+            reserve_count = int(v.get('top10_reserve_count') or 5)
+            primary_count = int(v.get('top10_primary_count') or v.get('top10_leader_count') or 10)
+            primary_stale = int(v.get('top10_primary_stale') or v.get('top10_raw_no_fresh') or 0)
+            selected_fresh = int(v.get('top10_selected_fresh') or v.get('price_ready') or 0)
+            selected_total = max(1, int(v.get('top10_leader_count') or v.get('active') or 10))
+            # v0090: always show the reserve window so TOP10 does not look like
+            # the 5 backup leaders were removed. Only 10 leaders vote, but they
+            # are selected from a TOP15 window: primary 10 + reserve 5.
+            top10_fresh_line = (
+                f"TOP15 window: primary {primary_count} + reserve {reserve_count}; "
+                f"used {reserve_used}/{reserve_count}; primary stale {primary_stale}/{primary_count}; "
+                f"selected fresh {selected_fresh}/{selected_total}"
+            )
 
+
+        is_top10_panel = v.get('signal_mode') == 'top10_leaders'
+        universe_label = "Trade universe" if is_top10_panel else "Universe"
         lines = [
-            f"🌊 Price Tsunami {s.get('bot_version', 'v0088')}",
+            f"🌊 Price Tsunami {s.get('bot_version', 'v0090')}",
             f"{state} • {last_update} • up {h:02d}:{m:02d}:{sec:02d}{cooldown_txt}",
             "",
             "РЫНОК",
-            f"Signal: {'TOP10 leaders' if v.get('signal_mode') == 'top10_leaders' else 'ALL zero total'}",
-            f"Universe: {usable_total} / {raw_total} zero-fee USDT",
+            f"Signal: {'TOP10 leaders' if is_top10_panel else 'ALL zero total'}",
+            f"{universe_label}: {usable_total} / {raw_total} zero-fee USDT",
+        ]
+        if is_top10_panel:
+            lines.append(f"Signal basket: TOP10 leaders ({top10_total})")
+        lines.extend([
             f"Blocked: {blocked_total} | Ignored: {ignored_total}",
             f"Ready: {v['price_ready']} | Stale/no fresh: {v['no_fresh_price']}",
-        ]
+        ])
         if top10_fresh_line:
             lines.append(top10_fresh_line)
         lines += [
@@ -1458,7 +1485,7 @@ class MicroMakerEngine:
             await self._ensure_client()
             rows = await self._refresh_market_scan(s, force=True)
             # Build the same decision text the live loop uses, but do not open trades here.
-            # v0088: scan_now must be read-only for signal/hold state; pressing the
+            # v0090: scan_now must be read-only for signal/hold state; pressing the
             # Price Scan button must not help satisfy HOLD checks or reset live state.
             saved_signal_state = (
                 list(self.wave_dominance_history),
@@ -1544,15 +1571,19 @@ class MicroMakerEngine:
             hold_need = int(s.get('wave_signal_hold_required') or 4)
             hold_checks = int(s.get('wave_signal_hold_checks') or 5)
             hold_sec = float(s.get('wave_signal_hold_sec') or 10.0)
+            is_top10_scan = v.get('signal_mode') == 'top10_leaders'
+            universe_label = "Trade universe" if is_top10_scan else "Universe"
+            signal_basket_line = f"Signal basket: TOP10 leaders ({top10_total})\n" if is_top10_scan else ""
             return (
-                f"🔍 Price Scan {s.get('bot_version', 'v0088')}\n"
+                f"🔍 Price Scan {s.get('bot_version', 'v0090')}\n"
                 f"{state} • {self._local_time_text(s)} • up {hh:02d}:{mm:02d}:{ss:02d}\n\n"
                 "РЫНОК\n"
-                f"Signal: {'TOP10 leaders' if v.get('signal_mode') == 'top10_leaders' else 'ALL zero total'}\n"
-                f"Universe: {universe} / {raw_total} zero-fee USDT\n"
+                f"Signal: {'TOP10 leaders' if is_top10_scan else 'ALL zero total'}\n"
+                f"{universe_label}: {universe} / {raw_total} zero-fee USDT\n"
+                f"{signal_basket_line}"
                 f"Blocked: {blocked_total} | Ignored: {ignored_detail}\n"
                 f"Ready: {v['price_ready']} | Stale/no fresh: {v['no_fresh_price']}\n"
-                f"{('TOP15 reserve: used ' + str(int(v.get('top10_reserve_used') or v.get('top10_stale_replaced') or 0)) + '/' + str(int(v.get('top10_reserve_count') or 5)) + '; fresh ' + str(v['price_ready']) + '/' + str(max(1, int(v.get('active') or 10))) + chr(10)) if v.get('signal_mode') == 'top10_leaders' and (int(v.get('top10_reserve_used') or v.get('top10_stale_replaced') or 0) > 0 or int(v.get('no_fresh_price') or 0) > 0) else ''}\n"
+                f"{('TOP15 window: primary ' + str(int(v.get('top10_primary_count') or v.get('top10_leader_count') or 10)) + ' + reserve ' + str(int(v.get('top10_reserve_count') or 5)) + '; used ' + str(int(v.get('top10_reserve_used') or v.get('top10_stale_replaced') or 0)) + '/' + str(int(v.get('top10_reserve_count') or 5)) + '; primary stale ' + str(int(v.get('top10_primary_stale') or v.get('top10_raw_no_fresh') or 0)) + '/' + str(int(v.get('top10_primary_count') or v.get('top10_leader_count') or 10)) + '; selected fresh ' + str(int(v.get('top10_selected_fresh') or v.get('price_ready') or 0)) + '/' + str(max(1, int(v.get('top10_leader_count') or v.get('active') or 10))) + chr(10)) if v.get('signal_mode') == 'top10_leaders' else ''}\n"
                 "СКАН 10с\n"
                 f"LONG {self._fmt_pct(v['long_pct'])} ({v['long']})\n"
                 f"SHORT {self._fmt_pct(v['short_pct'])} ({v['short']})\n"
@@ -1617,7 +1648,7 @@ class MicroMakerEngine:
 
     async def _run_loop(self) -> None:
         self._log_event("run_loop_started")
-        await self._notify("✅ Price Tsunami v0088 started: ALL mode 65/75% +15п.п.; TOP10 mode 7/10 normal, 7/10 +2 early, 8/10 tsunami; HOLD 4/5 за ~10s; entries from full zero-fee universe.")
+        await self._notify("✅ Price Tsunami v0090 started: ALL mode 65/75% +15п.п.; TOP10 mode 7/10 normal, 7/10 +2 early, 8/10 tsunami; HOLD 4/5 за ~10s; entries from full zero-fee universe.")
         while self.running:
             try:
                 s = self._settings()
@@ -1671,7 +1702,7 @@ class MicroMakerEngine:
             await self.stop(close_positions=True)
             return
         now = time.time()
-        # v0088: do not call private balance endpoint every 100ms loop tick.
+        # v0090: do not call private balance endpoint every 100ms loop tick.
         # A 12s poll is enough for drawdown diagnostics and prevents MEXC private
         # rate-limit storms from freezing scan/trading.
         balance_poll = max(1.0, float(s.get("private_balance_poll_sec") or 12.0))
@@ -1700,7 +1731,7 @@ class MicroMakerEngine:
         ignored = self._ignored_symbols(s)
 
         def apply_scan_cap(pool: list[str]) -> list[str]:
-            # v0088: max_zero_fee_scan_symbols <= 0 means ALL symbols, no 250 cap.
+            # v0090: max_zero_fee_scan_symbols <= 0 means ALL symbols, no 250 cap.
             limit = int(s.get("max_zero_fee_scan_symbols") or 0)
             return pool[:limit] if limit > 0 else pool
 
@@ -1848,7 +1879,7 @@ class MicroMakerEngine:
         )
         rest_fallback_budget = int(s.get("ws_scan_rest_fallback_limit") or 0) if ws_scan_mode else len(pool)
 
-        # v0088: controlled TOP15 leader window. Default repair uses scan data:
+        # v0090: controlled TOP15 leader window. Default repair uses scan data:
         # primary TOP10 + next 5 reserves. REST repair is disabled by default;
         # if manually enabled, restrict it to the same TOP15 window.
         signal_mode_for_scan = str(s.get("wave_market_signal_mode") or "all_zero_total").lower().strip()
@@ -1912,7 +1943,7 @@ class MicroMakerEngine:
                     add_scan_detail(sym, "reject", "depth", bid=bid, ask=ask, spread_ticks=spread_ticks, depth_bid=depth_b, depth_ask=depth_a, depth_min=depth_min, required_depth=required_depth, source=book.get("source"))
                     continue
                 imbalance = max(depth_b / max(depth_a, 1e-9), depth_a / max(depth_b, 1e-9))
-                # v0088: Price Tsunami no longer uses the old order-book
+                # v0090: Price Tsunami no longer uses the old order-book
                 # imbalance/edge direction filter to decide whether a coin is a
                 # candidate. Direction is price-vote only: price rose over 10s =>
                 # LONG, price fell => SHORT. Order book checks remain only as
@@ -1949,7 +1980,7 @@ class MicroMakerEngine:
                     em, top_score, micro_score = {}, 0.0, 0.0
                 move_ticks, move_age = self._recent_move_ticks(sym, float(s.get("wave_lookback_sec") or s.get("basket_rebound_lookback_sec") or 20.0), tick)
                 move_pct, move_pct_age = vote_move_pct, vote_age
-                # v0088: score is no longer the market-direction source. Keep it only
+                # v0090: score is no longer the market-direction source. Keep it only
                 # as secondary display/ranking; the wave detector uses move_pct votes.
                 wave_score = min(abs(float(move_pct or 0.0)) * 120.0, 30.0) if bool(s.get("wave_basket_enabled", False)) else 0.0
                 score = depth_score + spread_score + imbalance_score + volume_score + top_score + micro_score + wave_score
@@ -1957,7 +1988,7 @@ class MicroMakerEngine:
                     "symbol": sym,
                     "score": score,
                     "vote": vote,
-                    # v0088: in Price Tsunami the trade side comes from the 10s
+                    # v0090: in Price Tsunami the trade side comes from the 10s
                     # price vote, not from the old order-book edge/imbalance bias.
                     "bias": bias,
                     "spread_ticks": spread_ticks,
@@ -1996,7 +2027,7 @@ class MicroMakerEngine:
             scored = [r for r in scored if float(r.get("score") or 0) >= min_score]
             if before_count > len(scored):
                 reject_counts["score"] = reject_counts.get("score", 0) + (before_count - len(scored))
-        # v0088: denominator must be the whole selected universe. If a symbol has
+        # v0090: denominator must be the whole selected universe. If a symbol has
         # no fresh WS book / no 10s price history / scan error, count it as NEUTRAL
         # instead of silently shrinking 377 coins into e.g. 352 votes.
         voted_symbols = {MexcFuturesClient.contract_id(r.get("symbol")) for r in wave_vote_rows if r.get("symbol")}
@@ -2014,7 +2045,7 @@ class MicroMakerEngine:
         vote_summary = self._summarize_wave_votes(wave_vote_rows)
         self.last_wave_vote_rows = wave_vote_rows
         self.last_wave_vote_summary = vote_summary
-        # v0088: precompute TOP10 leaders from the same full zero-fee pool.
+        # v0090: precompute TOP10 leaders from the same full zero-fee pool.
         # Trade universe is still full, but TOP10 signal now prefers 10 fresh
         # leader books from the first N liquid leaders so a couple of stale WS
         # books do not make the panel show Ready 7 / No fresh 3.
@@ -2028,17 +2059,36 @@ class MicroMakerEngine:
         self.last_wave_leader_vote_rows = leader_vote_rows
         self.last_wave_leader_vote_summary = leader_vote_summary
         self.last_wave_leader_diag = leader_diag
-        self.stats.wave_state.update({
-            "active": vote_summary.get("active", 0),
-            "price_ready": vote_summary.get("price_ready", 0),
-            "no_fresh_price": vote_summary.get("no_fresh_price", 0),
-            "long": vote_summary.get("long", 0),
-            "short": vote_summary.get("short", 0),
-            "neutral": vote_summary.get("neutral", 0),
-            "long_pct": vote_summary.get("long_pct", 0.0),
-            "short_pct": vote_summary.get("short_pct", 0.0),
-            "neutral_pct": vote_summary.get("neutral_pct", 0.0),
+        # v0090: the scanner still scans the full zero-fee trade universe,
+        # but the live signal block must display the SAME source that decides
+        # the market. In TOP10 mode the panel/counts/reason use only the selected
+        # leader basket; full-universe rows remain available for trade picking.
+        signal_mode_for_panel = str(s.get("wave_market_signal_mode") or "all_zero_total").lower().strip()
+        if signal_mode_for_panel == "top10_leaders":
+            panel_summary = leader_vote_summary
+            panel_state = {
+                "signal_mode": "top10_leaders",
+                "leader_symbols": list(leader_symbols or []),
+                **dict(leader_diag or {}),
+                "top10_leader_count": int(s.get("wave_top10_leader_count") or 10),
+                "top10_reserve_count": int(s.get("wave_top10_reserve_count") or 5),
+                "top10_fresh_pool_count": int(s.get("wave_top10_fresh_pool_count") or ((s.get("wave_top10_leader_count") or 10) + (s.get("wave_top10_reserve_count") or 5))),
+            }
+        else:
+            panel_summary = vote_summary
+            panel_state = {"signal_mode": "all_zero_total", "leader_symbols": []}
+        panel_state.update({
+            "active": panel_summary.get("active", 0),
+            "price_ready": panel_summary.get("price_ready", 0),
+            "no_fresh_price": panel_summary.get("no_fresh_price", 0),
+            "long": panel_summary.get("long", 0),
+            "short": panel_summary.get("short", 0),
+            "neutral": panel_summary.get("neutral", 0),
+            "long_pct": panel_summary.get("long_pct", 0.0),
+            "short_pct": panel_summary.get("short_pct", 0.0),
+            "neutral_pct": panel_summary.get("neutral_pct", 0.0),
         })
+        self.stats.wave_state.update(panel_state)
         self.stats.last_scan_ts = now
         self.stats.last_scan_rows = scored
         self.stats.last_scan_reject_counts = dict(reject_counts)
@@ -2150,7 +2200,7 @@ class MicroMakerEngine:
     def _recent_move_pct(self, symbol: str, lookback_sec: float) -> tuple[float | None, float]:
         """Return mid-price percent move over lookback window, plus sample age.
 
-        v0088 Wave Price Tsunami Basket deliberately uses this simple fact instead of
+        v0090 Wave Price Tsunami Basket deliberately uses this simple fact instead of
         internal score: price now versus price N seconds ago.
         """
         sid = MexcFuturesClient.contract_id(symbol)
@@ -2283,7 +2333,7 @@ class MicroMakerEngine:
         else:
             forced = None
 
-        # v0088 Wave Price Tsunami Basket: market direction is not taken from the old
+        # v0090 Wave Price Tsunami Basket: market direction is not taken from the old
         # book score. A coin votes LONG when its mid-price rose over the price
         # lookback, SHORT when it fell. This makes the wave detector transparent:
         # count rose/fell coins every ~10 seconds, then fire the basket.
@@ -2413,7 +2463,7 @@ class MicroMakerEngine:
         return picked
 
     def _detect_wave_signal(self, rows: list[dict[str, Any]], s: dict[str, Any]) -> tuple[str | None, list[dict[str, Any]], dict[str, Any]]:
-        """Detect v0088 Price Tsunami from the selected market signal source.
+        """Detect v0090 Price Tsunami from the selected market signal source.
 
         ALL mode:
         - Normal Wave: dominance >= 75%.
@@ -2458,7 +2508,7 @@ class MicroMakerEngine:
             prev_key = getattr(self, "wave_top10_selection_key", "")
             selection_changed = bool(prev_key and selected_key and selected_key != prev_key)
             if selected_key and selected_key != prev_key:
-                # v0088: a TOP15 reserve swap changes the 10-symbol voting basket.
+                # v0090: a TOP15 reserve swap changes the 10-symbol voting basket.
                 # Do not compare the new basket against old percentages; that can
                 # create fake +2 leader acceleration and fire a false EARLY signal.
                 self.wave_dominance_history.clear()
@@ -2536,7 +2586,7 @@ class MicroMakerEngine:
             normal_count_need = max(1, int(s.get("wave_top10_normal_count") or 7))
             tsunami_count_need = max(normal_count_need, int(s.get("wave_top10_tsunami_count") or 8))
             accel_count_need = max(0, int(s.get("wave_top10_accel_count") or 2))
-            # v0088: TOP10 is mapped to the ALL-zero logic:
+            # v0090: TOP10 is mapped to the ALL-zero logic:
             # - 7/10 current direction = NORMAL, same as broad dominance.
             # - 7/10 + growth of +2 leaders over 60s = EARLY, same as +15p.p. acceleration.
             # - 8/10 current direction = TSUNAMI, because this is a very strong leader consensus.
@@ -2563,7 +2613,7 @@ class MicroMakerEngine:
 
         vote_summary = signal_summary
 
-        # v0088 HOLD rule: +15p.p. must be stable, not a one-scan spike.
+        # v0090 HOLD rule: +15p.p. must be stable, not a one-scan spike.
         # Default rule: 4 of the last 5 sampled checks over about 10 seconds.
         # This is stronger than the old 3/3s hold and tolerant to one noisy failed check.
         hold_checks = max(1, int(s.get("wave_signal_hold_checks") or 5))
@@ -2727,7 +2777,7 @@ class MicroMakerEngine:
             details["reason"] = "confirming"
             return None, [], details
 
-        # v0088: return a reserve list, not only the exact 5 slots.
+        # v0090: return a reserve list, not only the exact 5 slots.
         # First 5 are attempted immediately; the rest are backup candidates for
         # fast top-up if MEXC rejects/fails to fill some of the first orders.
         reserve_need_cfg = int(s.get("wave_open_reserve_count") or max(need * 2, 12))
@@ -2756,7 +2806,7 @@ class MicroMakerEngine:
             return
         client = await self._ensure_client()
         try:
-            # v0088: throttle private open_positions; this check used to run on
+            # v0090: throttle private open_positions; this check used to run on
             # every 100ms tick and could freeze/rate-limit the strategy.
             positions = await self._fetch_positions_cached(client, ttl=float(s.get("private_positions_poll_sec") or 8.0))
             existing = [p for p in positions if str(p.get("symbol") or "").upper().endswith("_USDT")]
@@ -2775,8 +2825,17 @@ class MicroMakerEngine:
             # while the loop heartbeat keeps moving.
             scan_rows: list[dict[str, Any]] = []
             scan_error = ""
+            signal_details: dict[str, Any] = {}
             try:
                 scan_rows = await self._refresh_market_scan(s, force=False)
+                # v0090: old positions block NEW entries, not signal accounting.
+                # Refresh the signal state so TOP10/ALL panel counters and reason
+                # stay live and use the selected mode while waiting for old slots.
+                try:
+                    _side_preview, _picks_preview, signal_details = self._detect_wave_signal(scan_rows, s)
+                except Exception as sig_e:
+                    self._log_error("wave_existing_positions_signal_preview_error", sig_e)
+                    signal_details = {}
             except Exception as e:
                 scan_error = str(e)[:180]
                 self.stats.last_error = scan_error
@@ -2785,9 +2844,14 @@ class MicroMakerEngine:
             if scan_error:
                 self.stats.last_action = f"wave wait: existing positions; scan error: {scan_error}"
             else:
+                mode_txt = str(signal_details.get("signal_mode") or s.get("wave_market_signal_mode") or "all_zero_total")
+                active_txt = int(signal_details.get("active") or self.stats.wave_state.get("active") or 0)
+                long_txt = int(signal_details.get("long") or self.stats.wave_state.get("long") or 0)
+                short_txt = int(signal_details.get("short") or self.stats.wave_state.get("short") or 0)
                 self.stats.last_action = (
                     "wave wait: existing positions; scan active "
-                    f"({len(scan_rows)} candidates, universe={int(self.stats.zero_fee_universe_count or 0)})"
+                    f"({len(scan_rows)} candidates, universe={int(self.stats.zero_fee_universe_count or 0)}, "
+                    f"signal={mode_txt} L/S={long_txt}/{short_txt}/{active_txt})"
                 )
 
             # Keep this event useful without writing it every 100ms.
@@ -2890,7 +2954,7 @@ class MicroMakerEngine:
             self._remember_wave_open_skip(symbol, "no_margin", margin_note=margin_note)
             self._log_event("wave_open_no_margin", symbol=symbol, margin_note=margin_note)
             return None
-        # v0088: aggressive entry means: choose a price that already exists in
+        # v0090: aggressive entry means: choose a price that already exists in
         # the opposite side of the book and has enough cumulative liquidity for
         # this slot. We do NOT place a passive maker order and wait in queue.
         # LONG consumes asks; SHORT consumes bids. If the best level is enough,
@@ -3035,7 +3099,7 @@ class MicroMakerEngine:
     async def _pretrade_fee_guard_many(self, symbols: list[str], s: dict[str, Any], client: MexcFuturesClient) -> tuple[set[str], list[dict[str, Any]]]:
         """Batch zero-fee verification for a wave basket.
 
-        v0088: the old opener queried fee_rate per symbol while opening. That
+        v0090: the old opener queried fee_rate per symbol while opening. That
         made 5 slots slow and gave the market time to flip before later slots.
         Here we query the contract fee table once, then validate all requested
         symbols from that snapshot.
@@ -3196,7 +3260,7 @@ class MicroMakerEngine:
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
         """Open a wave basket batch as close to simultaneously as MEXC allows.
 
-        v0088 replaces the old sequential slot-by-slot opener. It prepares all
+        v0090 replaces the old sequential slot-by-slot opener. It prepares all
         valid slots first, sends create-order requests together, cancels leftover
         limit orders in one batch, then reads positions once. This prevents the
         first two slots from opening while later slots wait long enough to flip.
@@ -3408,7 +3472,7 @@ class MicroMakerEngine:
         min_filled = min(wave_slots, min_filled_cfg)
         reserve_symbols = symbols[:max(wave_slots, int(s.get("wave_open_reserve_count") or max(wave_slots * 2, 12)))]
         order_symbols = reserve_symbols
-        # v0088: open each wave/top-up round as one batch. The old v0080 code
+        # v0090: open each wave/top-up round as one batch. The old v0080 code
         # opened slot-by-slot with a 1s gap and several private checks per symbol;
         # by the time slots 3-5 were attempted, many coins had flipped and the
         # basket often ended as 2/5. Batch entry prepares all valid slots, sends
@@ -3483,7 +3547,7 @@ class MicroMakerEngine:
             self._log_event("wave_cycle_no_fills", side=side, symbols=symbols)
             return
         if len(opened) < wave_slots:
-            # v0088: do NOT kill a partial basket immediately. The previous abort
+            # v0090: do NOT kill a partial basket immediately. The previous abort
             # could close a 2/5 or 4/5 basket at the worst possible moment. Keep
             # managing the open positions by NET/TP/trailing logic; the batch/top-up
             # opener above already tried to fill the missing slots quickly.
@@ -3499,7 +3563,7 @@ class MicroMakerEngine:
                 attempts=open_attempts,
             )
 
-        # v0088 real target scaling: calculate the ACTUAL targets used by the
+        # v0090 real target scaling: calculate the ACTUAL targets used by the
         # manager after MEXC tells us how many slots filled. This applies to both
         # NORMAL (+$0.05 full basket) and TSUNAMI (+$0.10 full basket).
         target_plan = self._scale_wave_targets_for_fills(
@@ -3541,7 +3605,7 @@ class MicroMakerEngine:
                 giveback=giveback,
             )
 
-        # v0088: REAL NET already includes commissions because it is calculated
+        # v0090: REAL NET already includes commissions because it is calculated
         # from live equity. The old fee-aware bump made Tsunami +$0.10 become
         # about +$0.12 when MEXC showed entry fees. Keep the user's TP as REAL NET
         # unless wave_fee_adjust_target_enabled is explicitly turned on.
@@ -3585,7 +3649,7 @@ class MicroMakerEngine:
         manage_balance_poll = max(0.5, float(s.get("private_manage_balance_poll_sec") or 1.5))
         opened_symbols = {str(p.get("symbol")) for p in opened if p.get("symbol")}
         while self.running:
-            # v0088: work only the symbols that belong to this basket, but fetch
+            # v0090: work only the symbols that belong to this basket, but fetch
             # all open positions through a short TTL cache. The old per-symbol loop
             # could hit private open_positions 5x every ~450ms while a basket was open.
             try:
@@ -3848,7 +3912,7 @@ class MicroMakerEngine:
         await self._manage_position(symbol, direction, pos, s, equity_before=equity_before)
 
     async def _manage_basket_position(self, symbol: str, direction: str, pos: dict[str, Any], s: dict[str, Any], equity_before: float | None = None) -> None:
-        """v0088 Wave Price Tsunami Basket manager.
+        """v0090 Wave Price Tsunami Basket manager.
 
         No per-position stop. A position is closed only with a maker close order
         when the configured positive basket target is reachable. After the task
@@ -3920,7 +3984,7 @@ class MicroMakerEngine:
             active_target_ticks = max(1, int(math.ceil(active_target_usdt / max(tick_value, 1e-12))))
             target_price = entry + active_target_ticks * tick if direction == "long" else entry - active_target_ticks * tick
 
-            # v0088 rotation: after the stale timeout, stop waiting for +$0.01.
+            # v0090 rotation: after the stale timeout, stop waiting for +$0.01.
             # The close order is downgraded to breakeven/small-profit so the slot can
             # rotate into a better coin. This is not a stop; it does not cross a loss.
             if direction == "long":

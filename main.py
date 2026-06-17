@@ -62,7 +62,7 @@ SIGNAL_STATE_RESET_KEYS = {
 def spawn_ui_task(coro, name: str = "ui_bg") -> asyncio.Task:
     """Run slow Telegram/API actions outside the callback handler so buttons do not stick.
 
-    v0088: one background UI task per action name. Repeated button taps must not
+    v0090: one background UI task per action name. Repeated button taps must not
     stack duplicate scans/fee checks/close-all operations in the background.
     If the same action is already running, keep it and close the unused coroutine.
     """
@@ -154,7 +154,7 @@ def signal_toggle_button() -> InlineKeyboardButton:
     Default is ALL total. Pressing the button flips to TOP10 leaders, and pressing
     again returns to ALL total. Trade entries still use the full zero-fee universe.
 
-    v0088 hotfix: use one explicit toggle callback instead of a precomputed
+    v0090 hotfix: use one explicit toggle callback instead of a precomputed
     set:<next-mode> callback. Telegram users can press older/stale inline panels;
     a real toggle always flips the current saved mode at handling time.
     """
@@ -168,7 +168,7 @@ def signal_toggle_button() -> InlineKeyboardButton:
 def main_menu() -> InlineKeyboardMarkup:
     """Live inline panel: only trading controls plus operational tool screens.
 
-    v0088 UI rule:
+    v0090 UI rule:
     - Telegram command menu keeps only: /start, /scan, /balance, /status, /help.
     - Live panel has one ALL total/TOP10 signal toggle. Default: ALL total.
     - Tool screens (Settings/Universe/API/Doctor/Log) are sent as separate
@@ -212,7 +212,7 @@ async def sync_telegram_command_menu(
     global COMMAND_MENU_SYNC_LAST_TS, COMMAND_MENU_SYNC_BACKOFF_UNTIL
     """Force-clean Telegram's native slash-command menu.
 
-    v0088 fix: Telegram keeps command menus separately by scope AND by
+    v0090 fix: Telegram keeps command menus separately by scope AND by
     language_code. The old long menu on Kevin's screenshot was a stale
     Russian/language-specific command list, so v0078 (default scope only) did
     not replace it visually. Here we delete and re-set exactly 5 commands for:
@@ -345,7 +345,7 @@ async def sync_telegram_command_menu(
                 except Exception as e:
                     log_error("telegram_command_menu_set_unexpected", e, scope=str(scope), language_code=lang or "")
         log_event(
-            "telegram_command_menu_synced_v0088",
+            "telegram_command_menu_synced_v0090",
             commands=[getattr(c, "command", str(c)) for c in commands],
             scopes=len(unique_scopes),
             languages=[lang or "default" for lang in unique_langs],
@@ -448,7 +448,7 @@ def settings_text() -> str:
         mode_txt = "TOP10 — направление считают 10 самых сильных/ликвидных non-stable монет"
     direction = str(s.get("direction_mode") or "both").upper()
     return (
-        f"⚙️ Settings {s.get('bot_version', 'v0088')}\n\n"
+        f"⚙️ Settings {s.get('bot_version', 'v0090')}\n\n"
         "Оставил средний вариант: не простыня как раньше, но и не пусто.\n\n"
         "СИГНАЛ\n"
         f"Signal: {mode_txt}\n"
@@ -549,7 +549,7 @@ def settings_menu() -> InlineKeyboardMarkup:
 def symbols_text(engine: MicroMakerEngine | None = None) -> str:
     """Clean Symbols screen.
 
-    v0088: show what matters first: raw zero-fee count, blocked count,
+    v0090: show what matters first: raw zero-fee count, blocked count,
     ignored count, trade universe, and current scan readiness. Long explanatory
     text is removed from the main Telegram card.
     """
@@ -595,7 +595,7 @@ def symbols_text(engine: MicroMakerEngine | None = None) -> str:
     if str(s.get('wave_market_signal_mode') or 'all_zero_total') == 'top10_leaders':
         leaders_line = "TOP10 leaders: " + (", ".join(leader_symbols[:10]) if leader_symbols else "будут выбраны после scan") + "\n"
     return (
-        f"📈 Symbols / Universe {s.get('bot_version', 'v0088')}\n\n"
+        f"📈 Symbols / Universe {s.get('bot_version', 'v0090')}\n\n"
         "РЕЖИМ\n"
         f"Auto-select: {'ON' if s.get('auto_select_symbols') else 'OFF'}\n"
         f"Signal: {s.get('wave_market_signal_mode', 'all_zero_total')}\n"
@@ -721,7 +721,7 @@ def panel_text(engine: MicroMakerEngine | None = None) -> str:
             s = STORE.load()
             state = "RUNNING" if getattr(e, "is_running", lambda: False)() else "STOPPED"
             return (
-                f"🌊 Price Tsunami {s.get('bot_version', 'v0088')}\n"
+                f"🌊 Price Tsunami {s.get('bot_version', 'v0090')}\n"
                 f"{state} • panel-safe-mode\n\n"
                 "⚠️ Live-панель восстановлена после UI-ошибки.\n"
                 f"Ошибка: {type(ex).__name__}: {str(ex)[:180]}\n\n"
@@ -732,7 +732,7 @@ def panel_text(engine: MicroMakerEngine | None = None) -> str:
     normal_tp = float(s.get("wave_normal_target_profit_usdt") or 0.05)
     tsunami_tp = float(s.get("wave_tsunami_target_profit_usdt") or 0.10)
     return (
-        f"🌊 Price Tsunami {s.get('bot_version', 'v0088')}\n"
+        f"🌊 Price Tsunami {s.get('bot_version', 'v0090')}\n"
         "State: STOPPED\n\n"
         "PRICE SCAN 10s: пока нет данных.\n"
         "LONG 0% | SHORT 0% | NEUTRAL 0%\n"
@@ -742,7 +742,7 @@ def panel_text(engine: MicroMakerEngine | None = None) -> str:
         f"Normal: сейчас >=75% стороны → {slots} сделок, 5x, NET +${normal_tp:.2f}\n"
         f"Tsunami: сейчас >=75% и эта же сторона выросла на +15п.п. за 60s → {slots} сделок, 10x, NET +${tsunami_tp:.2f}\n"
         "65/75 — итог сейчас; +15п.п. уже внутри этих процентов.\n"
-        "v0088: сигнал должен держаться 4 из 5 checks за ~10s; один шумовой провал не сбрасывает сигнал.\n\n"
+        "v0090: сигнал должен держаться 4 из 5 checks за ~10s; один шумовой провал не сбрасывает сигнал.\n\n"
         "Stop = пауза, позиции/ордера не трогает. Close All = снести всё.\n"
         "Нажми ▶️ Start Tsunami."
     )
@@ -1027,7 +1027,7 @@ async def update_live_panel(app: Application, force: bool = False) -> None:
 
 
 async def live_panel_loop(app: Application) -> None:
-    """v0088 clean rollback panel loop.
+    """v0090 clean rollback panel loop.
 
     RUNNING: edit one current scan panel every 5 sec.
     Every 10 min: delete all known scan panels and send one fresh panel down.
@@ -1175,7 +1175,7 @@ async def preset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     reset_engine_signal_state(engine)
     engine.clear_ignored_symbols()
     slots = int(STORE.load().get("wave_positions") or 5)
-    await reply_tool_message(context, chat_id, f"🌊 Price Tsunami v0088 применён: 10s price-scan, итоговые 65/75% + рост 15п.п., {slots} LONG/SHORT, 5x/10x, REAL NET выход.\n\n" + settings_text(), settings_menu())
+    await reply_tool_message(context, chat_id, f"🌊 Price Tsunami v0090 применён: 10s price-scan, итоговые 65/75% + рост 15п.п., {slots} LONG/SHORT, 5x/10x, REAL NET выход.\n\n" + settings_text(), settings_menu())
 
 
 async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1442,7 +1442,7 @@ async def send_log_full_document(context: ContextTypes.DEFAULT_TYPE, chat_id: in
         await context.bot.send_message(chat_id=chat_id, text=f"📄 /log_full {STORE.load().get('bot_version')}: собираю и отправляю TXT-файл...")
         log_event("log_full_export_requested", chat_id=chat_id)
         path = export_full_log(STORE.load(), engine or ENGINE)
-        caption = f"📄 Full debug log {STORE.load().get('bot_version', 'v0088')}"
+        caption = f"📄 Full debug log {STORE.load().get('bot_version', 'v0090')}"
         with open(path, "rb") as f:
             await asyncio.wait_for(context.bot.send_document(
                 chat_id=chat_id,
@@ -1572,7 +1572,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await install_command_keyboard(context, chat_id)
     s = STORE.load()
     txt = (
-        f"🆘 Price Tsunami Help — {s.get('bot_version', 'v0088')}\n\n"
+        f"🆘 Price Tsunami Help — {s.get('bot_version', 'v0090')}\n\n"
         "Логика торговли:\n"
         "1) Бот держит ALL active zero-fee *_USDT universe, без лимита 250.\n"
         "2) Каждые ~10 секунд сравнивает mid-price каждой монеты.\n"
@@ -1584,7 +1584,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Tsunami: >=75% и рост +15п.п. за 60s → Basket 3/5 по настройке, 10x, tsunami NET TP.\n"
         "TOP10: 7/10 = NORMAL, 7/10 + рост +2 монеты за 60с = EARLY, 8/10 = TSUNAMI. Входы всё равно из полного zero-fee universe.\n"
         "Важно: 65% и 75% — текущий итоговый процент; +15п.п. уже внутри этого значения, это не 65+15.\n"
-        "v0088 HOLD: вход только когда сигнал подтверждён 4 из 5 checks за ~10s; один шумовой провал не сбрасывает сигнал.\n\n"
+        "v0090 HOLD: вход только когда сигнал подтверждён 4 из 5 checks за ~10s; один шумовой провал не сбрасывает сигнал.\n\n"
         "Выбор монет: не самый перегретый топ, а середина 25-60% same-side candidates.\n"
         "Все сделки открываются одной стороной: либо вся корзина LONG, либо вся корзина SHORT. Если MEXC режет быстрые заявки, бот ждёт и повторяет те же слоты, затем добирает заменами.\n"
         "Закрытие: вся корзина по REAL NET equity PnL. Через 10 минут закрывает только ноль/микроплюс; минус не режет, ждёт восстановления.\n\n"
@@ -1652,7 +1652,7 @@ async def _finish_panel_task(
 ) -> None:
     """Execute a slow action and refresh panel afterwards. Used so button callbacks answer instantly.
 
-    v0088: detail screens such as Price Scan should not append the live panel
+    v0090: detail screens such as Price Scan should not append the live panel
     underneath. Slow background actions are deduped and wrapped in a timeout so
     repeated button taps cannot leave endless pending UI tasks.
     """
@@ -1902,7 +1902,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     if chat_id:
-        await context.bot.send_message(chat_id=chat_id, text="ℹ️ Эта старая кнопка больше не используется в v0088. Нажми /start для новой live-панели.")
+        await context.bot.send_message(chat_id=chat_id, text="ℹ️ Эта старая кнопка больше не используется в v0090. Нажми /start для новой live-панели.")
 
 
 async def runtime_watchdog_loop(app: Application) -> None:

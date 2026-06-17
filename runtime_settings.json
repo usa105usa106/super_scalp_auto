@@ -1,5 +1,5 @@
 {
-  "bot_version": "v0088",
+  "bot_version": "v0090",
   "mexc_api_key": "",
   "mexc_api_secret": "",
   "mexc_rest_base": "https://api.mexc.com",
@@ -64,7 +64,7 @@
   "max_entry_maker_fee_rate": 0.0,
   "max_entry_taker_fee_rate": 0.0,
   "fee_guard_ignore_symbol": true,
-  "trade_profile": "wave_price_tsunami_v0088",
+  "trade_profile": "wave_price_tsunami_v0090",
   "edge_filter_enabled": false,
   "entry_top_imbalance_ratio": 1.15,
   "entry_microprice_min_ticks": 0.1,

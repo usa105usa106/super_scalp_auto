@@ -1,4 +1,4 @@
-HOTFIX v0088 panel/scan
+HOTFIX v0090 panel/scan
 
 Fixes:
 1) quick_status_text no longer crashes in TOP10 leaders mode with NameError: top10_total.

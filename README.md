@@ -1,10 +1,12 @@
-# MEXC Micro Maker Bot — v0088 TOP15 Reserve Leader-Set Guard
+# MEXC Micro Maker Bot — v0090 TOP15 Reserve Leader-Set Guard
 
-## Что изменено в v0088
+## Что изменено в v0090
 
+- Сохранена и усилена логика TOP15 reserve: сигнал голосует только выбранной десяткой, но десятка каждый скан собирается из окна primary TOP10 + reserve 5.
+- Добавлена явная диагностика на панели: `TOP15 window: primary 10 + reserve 5; used X/5; primary stale Y/10; selected fresh Z/10`, чтобы было видно, что резервные 5 не удалены.
 - Добавлен guard для TOP15 reserve: если из-за stale/no-fresh меняется выбранная десятка лидеров, бот сбрасывает 60s acceleration/hold history. Это убирает ложный +2 leader acceleration от самой замены монет, а не от движения рынка.
 
-- Версия везде обновлена до `v0088`, profile: `wave_price_tsunami_v0088`.
+- Версия везде обновлена до `v0090`, profile: `wave_price_tsunami_v0090`.
 - Убрана сырая схема `TOP10 -> top30 replacement`.
 - Убрана зависимость от REST-repair по умолчанию для TOP10 сигнала.
 - `TOP10 leaders` теперь работает через контролируемое окно `TOP15`:
@@ -33,19 +35,20 @@ Selected TOP10: L0 L1 L2 L3 L5 L6 L7 L9 L10 L11
 ## Tests
 
 ```text
-ACTIVE_MANAGE_THROTTLE_TEST_OK v0088
-BATCH_OPEN_SMOKE_TEST_OK v0088
-CALLBACK_AUDIT_OK callbacks=36 v0088
-COMMAND_MENU_CLEANUP_TEST_OK v0088
-LOOP_TIMEOUT_TEST_OK v0088
-NO_MIRROR_TEST_OK v0088
-PANEL_LIFECYCLE_TEST_OK v0088
-PARTIAL_TARGET_SCALING_TEST_OK v0088
-PRIVATE_THROTTLE_TEST_OK v0088
-SETTINGS_PERSIST_TEST_OK v0088
-TOP10_FIRE_TEST_OK v0088
-TOP15_RESERVE_REPLACEMENT_TEST_OK v0088
-TOP15_SELECTION_CHANGE_GUARD_TEST_OK v0088
-UI_TEXT_AUDIT_OK v0088
-WAVE_PARTIAL_BATCH_OPEN_TEST_OK v0088
+ACTIVE_MANAGE_THROTTLE_TEST_OK v0090
+BATCH_OPEN_SMOKE_TEST_OK v0090
+CALLBACK_AUDIT_OK callbacks=35 v0090
+COMMAND_MENU_CLEANUP_TEST_OK v0090
+LOOP_TIMEOUT_TEST_OK v0090
+NO_MIRROR_TEST_OK v0090
+PANEL_LIFECYCLE_TEST_OK v0090
+PARTIAL_TARGET_SCALING_TEST_OK v0090
+PRIVATE_THROTTLE_TEST_OK v0090
+SETTINGS_PERSIST_TEST_OK v0090
+TOP10_FIRE_TEST_OK v0090
+TOP15_RESERVE_REPLACEMENT_TEST_OK v0090
+TOP15_RESERVE_PRIMARY_RESTORE_OK v0090
+TOP15_SELECTION_CHANGE_GUARD_TEST_OK v0090
+UI_TEXT_AUDIT_OK v0090
+WAVE_PARTIAL_BATCH_OPEN_TEST_OK v0090
 ```

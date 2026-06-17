@@ -1,4 +1,4 @@
-HOTFIX v0088 — ALL total / TOP10 inline toggle
+HOTFIX v0090 — ALL total / TOP10 inline toggle
 
 Что исправлено:
 1) Кнопка Signal теперь использует реальный callback `signal:toggle`, а не заранее рассчитанный `set:<next-mode>`.

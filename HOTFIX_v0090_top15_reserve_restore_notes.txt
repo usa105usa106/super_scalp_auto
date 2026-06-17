@@ -1,0 +1,22 @@
+HOTFIX v0090 — TOP15 reserve restore/visibility
+
+What was checked/fixed:
+- TOP10 signal mode keeps the required TOP15 window:
+  primary 10 leaders + 5 reserve leaders.
+- Only 10 symbols vote at a time.
+- If 1-5 primary leaders are stale/no-fresh, fresh reserve symbols fill the missing slots.
+- If a stale primary leader becomes fresh again, it returns automatically on the next scan and the reserve symbol drops out.
+- The panel and /scan now always show TOP15 reserve diagnostics in TOP10 mode:
+  TOP15 window: primary 10 + reserve 5; used X/5; primary stale Y/10; selected fresh Z/10
+- Version bumped everywhere to v0090.
+
+Safety:
+- Entries are still picked from the full zero-fee trade universe.
+- Existing positions still block new entries but do not block scan/signal updates.
+- No order/position close/open mechanics were changed in this hotfix.
+
+Tests:
+- py_compile OK
+- compileall OK
+- tests/*.py OK; long full run exceeded shell timeout once, remaining tests were rerun individually OK.
+- New test: TOP15_RESERVE_PRIMARY_RESTORE_OK v0090

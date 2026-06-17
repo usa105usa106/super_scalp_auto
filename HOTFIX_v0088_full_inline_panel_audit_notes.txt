@@ -1,4 +1,4 @@
-HOTFIX v0088 FULL INLINE/PANEL AUDIT
+HOTFIX v0090 FULL INLINE/PANEL AUDIT
 
 Scope:
 - Audited live panel, settings/universe/API tool screens, all visible inline callback_data, ALL total/TOP10 signal toggle, /scan read-only behavior, and panel lifecycle.

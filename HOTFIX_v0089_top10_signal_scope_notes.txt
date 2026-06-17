@@ -1,0 +1,25 @@
+HOTFIX v0090 — TOP10 signal scope / panel counters
+
+Problem:
+- In TOP10 leaders mode, the live panel could still show full zero-fee universe counts in the СКАН 10с block, for example LONG 38/149 while the decision text used TOP10 thresholds 7/10 and 8/10.
+- This made it look like the TOP10 toggle did not actually switch the scanner.
+
+Root cause:
+- _refresh_market_scan always wrote full-universe vote_summary into stats.wave_state.
+- When old/manual positions existed, _wave_loop_tick refreshed the scan but returned before _detect_wave_signal, so TOP10 leader counters never replaced the full-universe counters.
+- _wave_view only filled from last_wave_leader_vote_summary when keys were missing, so stale full-universe counters stayed visible.
+
+Fix:
+- In TOP10 mode, _refresh_market_scan now writes leader_vote_summary into the panel/signal state.
+- _wave_view now forces market-count keys from last_wave_leader_vote_summary whenever wave_market_signal_mode=top10_leaders.
+- Existing positions still block new entries, but the signal preview is refreshed so the panel reason/counters keep moving in the selected mode.
+- The full zero-fee universe is still scanned as the trade-entry pool; only the market signal block is scoped to TOP10.
+- ALL/TOP10 mode is preserved across v0090 hotfix upgrades instead of being reset to ALL by migration.
+- User-facing version bumped from v0088 to v0090.
+
+Tests:
+- python -m py_compile *.py tests/*.py
+- python -m compileall -q .
+- all tests/*.py OK
+- Added tests/top10_panel_scope_test.py
+- Panel and /scan now label the full pool as Trade universe in TOP10 mode and add Signal basket: TOP10 leaders (10), so the user can see that signal counts are not full-universe counts.

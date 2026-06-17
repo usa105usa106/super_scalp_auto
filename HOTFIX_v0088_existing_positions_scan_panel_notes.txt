@@ -1,4 +1,4 @@
-HOTFIX v0088 — existing positions must not freeze scan panel
+HOTFIX v0090 — existing positions must not freeze scan panel
 
 Problem observed in log 2026-06-17 08:01:
 - RUNNING loop heartbeat was alive.
