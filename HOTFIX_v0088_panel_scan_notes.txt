@@ -1,0 +1,14 @@
+HOTFIX v0088 panel/scan
+
+Fixes:
+1) quick_status_text no longer crashes in TOP10 leaders mode with NameError: top10_total.
+   This was blocking live panel rendering and also breaking Stop/Start panel refresh.
+2) scan_now_text (/scan / Price Scan button) now has the same TOP10 total guard.
+3) panel_text now has a safe fallback, so one UI formatting bug cannot kill the whole Telegram panel.
+4) /start now sends the live panel first and runs Telegram command-menu cleanup in background.
+   Command-menu cleanup is throttled/backed off on Telegram Flood control, so /start is no longer blocked by RetryAfter/timeout storms.
+
+Validation:
+- python -m py_compile main.py micro_maker_engine.py
+- all tests in tests/*.py passed
+- manual quick_status_text() check passed with wave_market_signal_mode=top10_leaders before first scan.

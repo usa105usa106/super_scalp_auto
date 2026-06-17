@@ -1277,7 +1277,12 @@ class MicroMakerEngine:
 
         if v.get("signal_mode") == "top10_leaders":
             accel_long, accel_short = self._top10_accel_lines(v)
+            # v0088 hotfix: quick_status_text uses TOP10 thresholds in the decision text.
+            # When the panel is in TOP10 mode this variable must exist even before
+            # any scan has populated leader_symbols/active counters.
+            top10_total = max(1, int(v.get("top10_leader_count") or len(v.get("leader_symbols") or []) or int(v.get("active") or 0) or 10))
         else:
+            top10_total = max(1, int(v.get("active") or 0))
             accel_long, accel_short = self._wave_accel_lines({
                 "old_long_pct": v["old_long_pct"],
                 "old_short_pct": v["old_short_pct"],
@@ -1456,6 +1461,7 @@ class MicroMakerEngine:
                 self.wave_candidate_count,
                 dict(self.stats.wave_state or {}),
                 self.wave_signal_mode_last,
+                self.wave_top10_selection_key,
             )
             try:
                 _side, picks, details = self._detect_wave_signal(rows, s)
@@ -1472,6 +1478,7 @@ class MicroMakerEngine:
                     self.wave_candidate_count,
                     self.stats.wave_state,
                     self.wave_signal_mode_last,
+                    self.wave_top10_selection_key,
                 ) = saved_signal_state
             raw_total = int(getattr(self.stats, "zero_fee_total_count", 0) or 0)
             blocked_total = int(getattr(self.stats, "zero_fee_blocked_count", 0) or 0)
@@ -1483,7 +1490,11 @@ class MicroMakerEngine:
             selected = ", ".join([str(r.get("symbol")) for r in picks[: int(s.get("wave_positions") or 5)]]) or "-"
             if v.get("signal_mode") == "top10_leaders":
                 accel_long, accel_short = self._top10_accel_lines(v)
+                # Same guard as quick_status_text: /scan must not crash in TOP10 mode
+                # before the first live scan has warmed up leader counters.
+                top10_total = max(1, int(v.get("top10_leader_count") or len(v.get("leader_symbols") or []) or int(v.get("active") or 0) or 10))
             else:
+                top10_total = max(1, int(v.get("active") or 0))
                 accel_long, accel_short = self._wave_accel_lines({
                     "old_long_pct": v["old_long_pct"],
                     "old_short_pct": v["old_short_pct"],
@@ -1501,16 +1512,16 @@ class MicroMakerEngine:
             elif v["mode"] == "early":
                 decision = f"EARLY {v['side']} — 5 {v['side']}, 5x, REAL NET +$0.05"
                 if v.get("signal_mode") == "top10_leaders":
-                    reason = f"TOP10 >= {v['top10_normal_count']}/{max(1, v['active'])} + рост +{v['top10_accel_count']} мон. за 60с, после HOLD"
+                    reason = f"TOP10 >= {v['top10_normal_count']}/{top10_total} + рост +{v['top10_accel_count']} мон. за 60с, после HOLD"
                 else:
                     reason = "есть 65% + рост +15п.п., после HOLD"
             elif v["mode"] == "normal":
                 decision = f"NORMAL {v['side']} — 5 {v['side']}, 5x, REAL NET +$0.05"
-                reason = f"TOP10 >= {v['top10_normal_count']}/{max(1, v['active'])}, после HOLD" if v.get("signal_mode") == "top10_leaders" else "есть 75% dominance, после HOLD"
+                reason = f"TOP10 >= {v['top10_normal_count']}/{top10_total}, после HOLD" if v.get("signal_mode") == "top10_leaders" else "есть 75% dominance, после HOLD"
             else:
                 decision = f"TSUNAMI {v['side']} — 5 {v['side']}, 10x, REAL NET +$0.10"
                 if v.get("signal_mode") == "top10_leaders":
-                    reason = f"TOP10 >= {v['top10_tsunami_count']}/{max(1, v['active'])}, после HOLD"
+                    reason = f"TOP10 >= {v['top10_tsunami_count']}/{top10_total}, после HOLD"
                 else:
                     reason = "есть 75% dominance + рост +15п.п., после HOLD"
             state = "RUNNING" if self.is_running() else "STOPPED"

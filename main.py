@@ -17,6 +17,12 @@ from micro_maker_engine import MicroMakerEngine
 from mexc_client import MexcFuturesClient
 from full_logger import export_full_log, clear_full_log, log_event, log_error
 
+try:
+    from telegram.error import RetryAfter  # type: ignore
+except Exception:  # offline tests may stub telegram.error without RetryAfter
+    class RetryAfter(TelegramError):  # type: ignore
+        pass
+
 load_dotenv()
 
 STORE = ConfigStore()
@@ -25,7 +31,32 @@ PANEL_LOCK = asyncio.Lock()
 PANEL_UPDATE_TASK: asyncio.Task | None = None
 RUNTIME_WATCHDOG_TASK: asyncio.Task | None = None
 PROCESS_START_TS = time.time()
+COMMAND_MENU_SYNC_LAST_TS = 0.0
+COMMAND_MENU_SYNC_BACKOFF_UNTIL = 0.0
 UI_BG_TASKS: dict[str, asyncio.Task] = {}
+
+# Changing signal thresholds/source while the bot is running must not reuse old
+# HOLD samples or TOP10 leader acceleration history. This reset never touches
+# orders or positions; it only clears cached market-signal state.
+SIGNAL_STATE_RESET_KEYS = {
+    "wave_market_signal_mode",
+    "wave_early_min_side_ratio",
+    "wave_min_side_ratio",
+    "wave_accel_trigger_pct",
+    "wave_signal_hold_required",
+    "wave_signal_hold_checks",
+    "wave_signal_hold_sec",
+    "wave_top10_leader_count",
+    "wave_top10_reserve_count",
+    "wave_top10_fresh_pool_count",
+    "wave_top10_prefer_fresh",
+    "wave_top10_rest_refresh_enabled",
+    "wave_top10_rest_refresh_limit",
+    "wave_top10_normal_count",
+    "wave_top10_tsunami_count",
+    "wave_top10_accel_count",
+    "wave_top10_tsunami_requires_accel",
+}
 
 
 def spawn_ui_task(coro, name: str = "ui_bg") -> asyncio.Task:
@@ -122,12 +153,16 @@ def signal_toggle_button() -> InlineKeyboardButton:
 
     Default is ALL total. Pressing the button flips to TOP10 leaders, and pressing
     again returns to ALL total. Trade entries still use the full zero-fee universe.
+
+    v0088 hotfix: use one explicit toggle callback instead of a precomputed
+    set:<next-mode> callback. Telegram users can press older/stale inline panels;
+    a real toggle always flips the current saved mode at handling time.
     """
     s = STORE.load()
     mode = str(s.get("wave_market_signal_mode") or "all_zero_total")
     if mode == "top10_leaders":
-        return b("✅ Signal: TOP10", "set:wave_market_signal_mode:all_zero_total")
-    return b("✅ Signal: ALL total", "set:wave_market_signal_mode:top10_leaders")
+        return b("✅ Signal: TOP10 → ALL", "signal:toggle")
+    return b("✅ Signal: ALL total → TOP10", "signal:toggle")
 
 
 def main_menu() -> InlineKeyboardMarkup:
@@ -174,6 +209,7 @@ async def sync_telegram_command_menu(
     chat_id: int | None = None,
     user_language_code: str | None = None,
 ) -> None:
+    global COMMAND_MENU_SYNC_LAST_TS, COMMAND_MENU_SYNC_BACKOFF_UNTIL
     """Force-clean Telegram's native slash-command menu.
 
     v0088 fix: Telegram keeps command menus separately by scope AND by
@@ -188,6 +224,25 @@ async def sync_telegram_command_menu(
 
     Inline buttons are not touched.
     """
+    now = time.time()
+    if now < COMMAND_MENU_SYNC_BACKOFF_UNTIL:
+        log_event(
+            "telegram_command_menu_sync_skipped_backoff",
+            retry_in_sec=round(COMMAND_MENU_SYNC_BACKOFF_UNTIL - now, 1),
+            chat_id=chat_id,
+        )
+        return
+    # /start may be pressed repeatedly. Syncing command menus is cosmetic and
+    # Telegram can flood-limit it for many minutes, so never let it block panel creation.
+    if chat_id is not None and COMMAND_MENU_SYNC_LAST_TS and now - COMMAND_MENU_SYNC_LAST_TS < 1800.0:
+        log_event(
+            "telegram_command_menu_sync_skipped_recent",
+            age_sec=round(now - COMMAND_MENU_SYNC_LAST_TS, 1),
+            chat_id=chat_id,
+        )
+        return
+    COMMAND_MENU_SYNC_LAST_TS = now
+
     commands = core_bot_commands()
     bot = app.bot
 
@@ -259,6 +314,10 @@ async def sync_telegram_command_menu(
                     kwargs["language_code"] = lang
                 try:
                     await delete_cmds(**kwargs)
+                except RetryAfter as e:
+                    COMMAND_MENU_SYNC_BACKOFF_UNTIL = time.time() + float(getattr(e, "retry_after", 300) or 300)
+                    log_error("telegram_command_menu_delete_flood", e, scope=str(scope), language_code=lang or "")
+                    return
                 except TelegramError as e:
                     log_error("telegram_command_menu_delete_error", e, scope=str(scope), language_code=lang or "")
                 except Exception as e:
@@ -277,6 +336,10 @@ async def sync_telegram_command_menu(
                 try:
                     await set_cmds(commands, **kwargs)
                     set_count += 1
+                except RetryAfter as e:
+                    COMMAND_MENU_SYNC_BACKOFF_UNTIL = time.time() + float(getattr(e, "retry_after", 300) or 300)
+                    log_error("telegram_command_menu_set_flood", e, scope=str(scope), language_code=lang or "")
+                    return
                 except TelegramError as e:
                     log_error("telegram_command_menu_set_error", e, scope=str(scope), language_code=lang or "")
                 except Exception as e:
@@ -428,8 +491,8 @@ def settings_menu() -> InlineKeyboardMarkup:
     s = STORE.load()
     mode = str(s.get("wave_market_signal_mode") or "all_zero_total")
     mode_btn = b(
-        ("✅ Signal TOP10" if mode == "top10_leaders" else "✅ Signal ALL total"),
-        "set:wave_market_signal_mode:" + ("all_zero_total" if mode == "top10_leaders" else "top10_leaders"),
+        ("✅ Signal TOP10 → ALL" if mode == "top10_leaders" else "✅ Signal ALL total → TOP10"),
+        "signal:toggle",
     )
     direction = str(s.get('direction_mode') or 'both').lower()
     dir_both = "✅ " if direction == "both" else ""
@@ -651,7 +714,19 @@ def panel_mode_for_signal_return() -> str:
 def panel_text(engine: MicroMakerEngine | None = None) -> str:
     e = engine or ENGINE
     if e:
-        return e.quick_status_text()
+        try:
+            return e.quick_status_text()
+        except Exception as ex:
+            log_error("telegram_panel_text_error", ex)
+            s = STORE.load()
+            state = "RUNNING" if getattr(e, "is_running", lambda: False)() else "STOPPED"
+            return (
+                f"🌊 Price Tsunami {s.get('bot_version', 'v0088')}\n"
+                f"{state} • panel-safe-mode\n\n"
+                "⚠️ Live-панель восстановлена после UI-ошибки.\n"
+                f"Ошибка: {type(ex).__name__}: {str(ex)[:180]}\n\n"
+                "Торговый цикл отдельно; проверь /status или /log_full."
+            )
     s = STORE.load()
     slots = int(s.get("wave_positions") or 5)
     normal_tp = float(s.get("wave_normal_target_profit_usdt") or 0.05)
@@ -838,6 +913,22 @@ def query_is_live_panel(q) -> bool:
         return False
 
 
+def query_looks_like_live_panel(q) -> bool:
+    """Best-effort detection for stale/rotated live panels.
+
+    Telegram inline buttons can survive after the stored panel id was rotated or
+    replaced. The ALL/TOP10 signal button lives on the live panel, so if the text
+    clearly looks like the Price Tsunami live card, treat that message as the
+    current panel and re-register its identity after editing.
+    """
+    try:
+        msg = getattr(q, "message", None)
+        text = str(getattr(msg, "text", "") or getattr(msg, "caption", "") or "")
+        return bool("Price Tsunami" in text and ("РЫНОК" in text or "СКАН 10с" in text or "КОРЗИНА" in text))
+    except Exception:
+        return False
+
+
 async def edit_query_message(q, text: str, reply_markup: InlineKeyboardMarkup | None = None) -> None:
     """Edit a tool/private message without registering it as the live scan panel."""
     if not q.message:
@@ -867,7 +958,7 @@ async def show_tool_screen(q, context: ContextTypes.DEFAULT_TYPE, chat_id: int, 
     If it was pressed inside an already separate tool message, edit that tool
     message in place. In both cases the stored live panel id is left unchanged.
     """
-    if q.message and not query_is_live_panel(q):
+    if q.message and not query_is_live_panel(q) and not query_looks_like_live_panel(q):
         await edit_query_message(q, text, reply_markup)
         return
     await send_tool_message(context, chat_id, text, reply_markup)
@@ -971,14 +1062,16 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id if update.effective_chat else None
     if not chat_id:
         return
-    # v0088: force-clean native Telegram slash menu on the actual private chat too.
-    # This fixes stale Russian/language-specific command lists that survive restart.
     user_lang = getattr(update.effective_user, "language_code", None) if update.effective_user else None
-    await sync_telegram_command_menu(context.application, chat_id=chat_id, user_language_code=user_lang)
     engine = await ensure_engine(context, chat_id)
-    # /start should give one clean live panel, not leave duplicate old panels above.
+    # /start must always show the live panel immediately. Telegram command-menu
+    # cleanup is cosmetic and can hit Flood control, so run it later in background.
     await delete_all_panels(context.application)
     await send_fresh_panel(context, chat_id, panel_text(engine), main_menu(), mode="main")
+    spawn_ui_task(
+        sync_telegram_command_menu(context.application, chat_id=chat_id, user_language_code=user_lang),
+        name="ui_sync_command_menu",
+    )
 
 
 async def panel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1172,7 +1265,7 @@ async def set_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         else:
             val = raw
         STORE.set(key, val)
-        if key == "wave_market_signal_mode":
+        if key in SIGNAL_STATE_RESET_KEYS:
             reset_engine_signal_state(ENGINE)
         if key in {"scan_interval_sec", "max_zero_fee_scan_symbols", "zero_fee_rescan_sec", "zero_fee_universe_max_symbols", "min_depth_usdt", "min_depth_multiplier", "switch_score_improvement_pct", "min_imbalance_ratio", "min_trade_score", "entry_recheck_ms", "entry_recheck_required", "entry_recheck_count", "cooldown_after_loss_sec", "cooldown_after_trade_sec", "market_data_mode", "ws_depth_enabled", "ws_depth_max_symbols", "ws_book_stale_ms"}:
             await reply_tool_message(context, chat_id, f"✅ {key} = {val}\n\n" + symbols_text(), symbols_menu())
@@ -1505,6 +1598,48 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await context.bot.send_message(chat_id=chat_id, text=txt[:3900])
 
 
+async def apply_market_signal_mode_from_callback(
+    q,
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int | None,
+    engine: MicroMakerEngine | None,
+    raw_value: str | None = None,
+    *,
+    toggle: bool = False,
+) -> None:
+    """Apply ALL total/TOP10 from any inline button and refresh the right card.
+
+    Handles both new `signal:toggle` callbacks and old
+    `set:wave_market_signal_mode:<mode>` callbacks, so existing Telegram
+    messages from the previous build do not break.
+    """
+    before = normalize_market_mode(str(STORE.load().get("wave_market_signal_mode") or "all_zero_total")) or "all_zero_total"
+    if toggle:
+        value = "all_zero_total" if before == "top10_leaders" else "top10_leaders"
+    else:
+        value = normalize_market_mode(str(raw_value or "")) or str(raw_value or "")
+    if value not in {"all_zero_total", "top10_leaders"}:
+        if chat_id:
+            await context.bot.send_message(chat_id=chat_id, text="❌ market mode: используй all или top10")
+        return
+
+    STORE.set("wave_market_signal_mode", value)
+    reset_engine_signal_state(engine)
+    log_event("market_signal_mode_changed", source="inline", old=before, new=value, toggle=toggle)
+
+    # If the button came from the live card, always edit that card and register
+    # it as the live panel. This fixes stale-panel/rotated-panel cases where
+    # query_is_live_panel() is false even though the user tapped the live panel.
+    if q.message and (query_is_live_panel(q) or query_looks_like_live_panel(q)):
+        await edit_query_as_panel(q, panel_text(engine), main_menu(), mode="main")
+    elif q.message:
+        await edit_query_message(q, settings_text(), settings_menu())
+        if chat_id:
+            await update_live_panel(context.application, force=True)
+    elif chat_id:
+        await upsert_panel(context, chat_id, panel_text(engine), main_menu(), mode="main")
+
+
 async def _finish_panel_task(
     context: ContextTypes.DEFAULT_TYPE,
     chat_id: int | None,
@@ -1562,13 +1697,24 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await q.answer("❌ Close All запущен")
         elif data == "mm:start":
             await q.answer("▶️ Start Tsunami принят")
-        elif data.startswith("set:wave_market_signal_mode:"):
+        elif data == "signal:toggle" or data == "toggle:wave_market_signal_mode" or data.startswith("set:wave_market_signal_mode:"):
             await q.answer("Signal mode переключён")
         else:
             await q.answer()
     except TelegramError:
         pass
     engine = await ensure_engine(context, chat_id)
+
+    if data == "signal:toggle" or data == "toggle:wave_market_signal_mode":
+        await apply_market_signal_mode_from_callback(q, context, chat_id, engine, toggle=True)
+        return
+    if data.startswith("set:wave_market_signal_mode:"):
+        try:
+            _set, _key, raw = data.split(":", 2)
+        except ValueError:
+            raw = ""
+        await apply_market_signal_mode_from_callback(q, context, chat_id, engine, raw_value=raw, toggle=False)
+        return
 
     if data == "menu:main":
         if q.message and query_is_live_panel(q):
@@ -1714,28 +1860,14 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         key = data.split(":", 1)[1]
         s = STORE.load()
         STORE.set(key, not bool(s.get(key)))
+        if key in SIGNAL_STATE_RESET_KEYS:
+            reset_engine_signal_state(engine)
         txt = symbols_text(engine) if key in {"auto_select_symbols", "allow_manual_fee_fallback", "only_zero_fee", "ws_depth_enabled"} else settings_text()
         markup = symbols_menu() if key in {"auto_select_symbols", "allow_manual_fee_fallback", "only_zero_fee", "ws_depth_enabled"} else settings_menu()
         if q.message and not query_is_live_panel(q):
             await edit_query_message(q, txt, markup)
         elif chat_id:
             await send_tool_message(context, chat_id, txt, markup)
-        return
-    if data.startswith("set:wave_market_signal_mode:"):
-        _, key, raw = data.split(":", 2)
-        value = normalize_market_mode(raw) or raw
-        if value not in {"all_zero_total", "top10_leaders"}:
-            if chat_id:
-                await context.bot.send_message(chat_id=chat_id, text="❌ market mode: используй all или top10")
-            return
-        STORE.set(key, value)
-        reset_engine_signal_state(engine)
-        if q.message and query_is_live_panel(q):
-            await edit_query_as_panel(q, panel_text(engine), main_menu(), mode="main")
-        elif q.message:
-            await edit_query_message(q, settings_text(), settings_menu())
-        elif chat_id:
-            await send_tool_message(context, chat_id, settings_text(), settings_menu())
         return
     if data.startswith("set:"):
         _, key, raw = data.split(":", 2)
@@ -1750,6 +1882,8 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             else:
                 value = raw
             STORE.set(key, value)
+            if key in SIGNAL_STATE_RESET_KEYS:
+                reset_engine_signal_state(engine)
             if key in {"scan_interval_sec", "max_zero_fee_scan_symbols", "zero_fee_rescan_sec", "zero_fee_universe_max_symbols", "min_depth_usdt", "min_depth_multiplier", "switch_score_improvement_pct", "min_spread_ticks", "max_spread_ticks", "min_imbalance_ratio", "min_trade_score", "entry_recheck_ms", "entry_recheck_required", "entry_recheck_count", "cooldown_after_loss_sec", "cooldown_after_trade_sec", "market_data_mode", "ws_depth_enabled", "ws_depth_max_symbols", "ws_book_stale_ms"}:
                 txt = symbols_text(engine)
                 markup = symbols_menu()

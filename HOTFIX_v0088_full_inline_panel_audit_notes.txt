@@ -1,0 +1,25 @@
+HOTFIX v0088 FULL INLINE/PANEL AUDIT
+
+Scope:
+- Audited live panel, settings/universe/API tool screens, all visible inline callback_data, ALL total/TOP10 signal toggle, /scan read-only behavior, and panel lifecycle.
+
+Fixes added after signal-toggle hotfix:
+1) Signal-related inline settings now clear cached HOLD/dominance/TOP10-selection state.
+   This prevents old samples from being reused after changing Early/Normal/Acceleration/Hold/TOP10 thresholds while live.
+   It does NOT touch positions/orders.
+2) /set for the same signal-related keys also clears cached signal state.
+3) Price Scan read-only path now preserves wave_top10_selection_key too.
+   /scan cannot silently mutate TOP10 leader-selection history used by the live loop.
+4) Tool screens pressed from stale-but-live-looking Price Tsunami panels now open as separate tool messages instead of overwriting that stale scan card.
+5) Added offline tests:
+   - inline_panel_buttons_full_audit_test.py
+   - scan_now_preserves_signal_state_test.py
+
+Validation:
+- python -m py_compile *.py tests/*.py OK
+- python -m compileall -q . OK
+- all tests/*.py OK
+
+Trading safety:
+- No changes to order placement, close logic, position sizing, leverage, TP/SL, API keys, or exchange endpoints.
+- This patch is UI/panel/signal-cache hygiene only.

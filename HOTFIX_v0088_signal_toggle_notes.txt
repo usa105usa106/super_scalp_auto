@@ -1,0 +1,26 @@
+HOTFIX v0088 — ALL total / TOP10 inline toggle
+
+Что исправлено:
+1) Кнопка Signal теперь использует реальный callback `signal:toggle`, а не заранее рассчитанный `set:<next-mode>`.
+   Поэтому старые/повторно нажатые inline-панели больше не оставляют режим без изменения.
+2) Добавлена обратная совместимость со старыми callback:
+   - set:wave_market_signal_mode:top10_leaders
+   - set:wave_market_signal_mode:all_zero_total
+   - toggle:wave_market_signal_mode
+3) Если Telegram-панель была пересоздана/повёрнута и stored message_id устарел,
+   кнопка всё равно распознаёт live-карточку по тексту Price Tsunami и регистрирует её как актуальную.
+4) При переключении ALL/TOP10 чистится signal history / HOLD / dominance cache, чтобы старые сэмплы не смешивались.
+5) Убрано двойное upsert-сообщение при mm:start.
+6) В /scan TOP10 denominator теперь везде 10/top10_total, а не случайно active/full universe.
+
+Проверка:
+- py_compile main.py, micro_maker_engine.py, config_store.py — OK
+- Все tests/*.py — OK
+
+Как проверить в Telegram:
+1) /start
+2) Нажать кнопку `✅ Signal: ALL total → TOP10`
+   Панель должна сразу показать `Signal: TOP10 leaders`, кнопка станет `✅ Signal: TOP10 → ALL`.
+3) Нажать ещё раз
+   Панель должна сразу показать `Signal: ALL zero total`, кнопка станет `✅ Signal: ALL total → TOP10`.
+4) Можно проверить /market_mode — должен показывать текущий режим.
