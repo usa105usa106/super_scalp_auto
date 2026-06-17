@@ -64,6 +64,10 @@ class MicroMakerEngine:
         self.client: MexcFuturesClient | None = None
         self.task: asyncio.Task | None = None
         self.running = False
+        # Prevent /start, inline Start and runtime watchdog from creating two
+        # concurrent run_loop tasks when live_enabled is true but start() is
+        # still warming up the client/balance.
+        self._start_lock = asyncio.Lock()
         self.active_tasks: dict[str, asyncio.Task] = {}
         self.zero_fee_cache: list[str] = []
         self.zero_fee_ts = 0.0
@@ -107,6 +111,11 @@ class MicroMakerEngine:
         # reset acceleration/hold history so a basket cannot fire from a fake
         # +2 leader acceleration caused only by replacing stale symbols.
         self.wave_top10_selection_key: str = ""
+        # v0088 hotfix: when manual/legacy positions already exist, the wave
+        # engine must still refresh market scan/vote diagnostics for the live
+        # panel. Throttle the informational skip log so 100ms ticks do not spam
+        # the full debug log while entries are blocked by those positions.
+        self._last_wave_existing_log_ts: float = 0.0
         log_event("engine_init", version=self._settings().get("bot_version"))
 
     def _log_event(self, event: str, **data: Any) -> None:
@@ -958,35 +967,36 @@ class MicroMakerEngine:
         return max(0.0, margin), note
 
     async def start(self) -> str:
-        self._log_event("start_requested")
-        if self.is_running():
-            self._log_event("start_skipped_already_running")
-            return "Micro Maker уже работает."
-        try:
-            self.client = None
-            await self._ensure_client()
-        except Exception as e:
-            self._log_error("start_failed_ensure_client", e)
-            return f"❌ {e}"
-        self.running = True
-        self.store.set("live_enabled", True)
-        self.stats = EngineStats(started_ts=time.time())
-        self.reset_signal_state()
-        self.stats.started_ts = time.time()
-        self.last_selected_symbols = []
-        self.last_symbol_switch_ts = 0.0
-        self.cooldown_until_ts = 0.0
-        self.last_trade_closed_ts = 0.0
-        try:
-            bal = await self._fetch_balance_cached(self.client, force=True) if self.client else {}
-            self.stats.start_equity = self._usdt_from_balance(bal)[0]
-        except Exception as e:
-            self.stats.last_error = f"balance: {e}"
-            self._log_error("start_balance_error", e)
-        self.task = asyncio.create_task(self._run_loop(), name="micro_maker_loop")
-        self._log_event("start_success", start_equity=self.stats.start_equity)
-        slots = int(self._settings().get("wave_positions") or 5)
-        return f"▶️ Price Tsunami v0088 запущен. Схема: price-scan 10s по активным zero-fee монетам → LONG/SHORT/NEUTRAL проценты → {slots} сделок одной стороной → закрытие всей корзины по REAL NET PnL."
+        async with self._start_lock:
+            self._log_event("start_requested")
+            if self.is_running():
+                self._log_event("start_skipped_already_running")
+                return "Micro Maker уже работает."
+            try:
+                self.client = None
+                await self._ensure_client()
+            except Exception as e:
+                self._log_error("start_failed_ensure_client", e)
+                return f"❌ {e}"
+            self.running = True
+            self.store.set("live_enabled", True)
+            self.stats = EngineStats(started_ts=time.time())
+            self.reset_signal_state()
+            self.stats.started_ts = time.time()
+            self.last_selected_symbols = []
+            self.last_symbol_switch_ts = 0.0
+            self.cooldown_until_ts = 0.0
+            self.last_trade_closed_ts = 0.0
+            try:
+                bal = await self._fetch_balance_cached(self.client, force=True) if self.client else {}
+                self.stats.start_equity = self._usdt_from_balance(bal)[0]
+            except Exception as e:
+                self.stats.last_error = f"balance: {e}"
+                self._log_error("start_balance_error", e)
+            self.task = asyncio.create_task(self._run_loop(), name="micro_maker_loop")
+            self._log_event("start_success", start_equity=self.stats.start_equity)
+            slots = int(self._settings().get("wave_positions") or 5)
+            return f"▶️ Price Tsunami v0088 запущен. Схема: price-scan 10s по активным zero-fee монетам → LONG/SHORT/NEUTRAL проценты → {slots} сделок одной стороной → закрытие всей корзины по REAL NET PnL."
 
     async def stop(self, close_positions: bool = False) -> str:
         self._log_event("stop_requested", close_positions=close_positions, active_tasks=list(self.active_tasks.keys()))
@@ -2758,8 +2768,40 @@ class MicroMakerEngine:
         if existing:
             self.stats.open_position_symbols = [str(p.get("symbol")) for p in existing if p.get("symbol")]
             self.stats.current_symbols = self.stats.open_position_symbols[: max(1, int(s.get("wave_positions") or 5))]
-            self.stats.last_action = "wave wait: existing positions detected; use Close All or let previous manager finish before new wave"
-            self._log_event("wave_skip_existing_positions", positions=existing)
+
+            # Critical panel/scan hotfix: existing positions block new entries,
+            # but they must NOT block the market scanner. Otherwise the live
+            # panel stays at Universe 0/0, Ready 0, LONG/SHORT/NEUTRAL 0 forever
+            # while the loop heartbeat keeps moving.
+            scan_rows: list[dict[str, Any]] = []
+            scan_error = ""
+            try:
+                scan_rows = await self._refresh_market_scan(s, force=False)
+            except Exception as e:
+                scan_error = str(e)[:180]
+                self.stats.last_error = scan_error
+                self._log_error("wave_existing_positions_scan_error", e)
+
+            if scan_error:
+                self.stats.last_action = f"wave wait: existing positions; scan error: {scan_error}"
+            else:
+                self.stats.last_action = (
+                    "wave wait: existing positions; scan active "
+                    f"({len(scan_rows)} candidates, universe={int(self.stats.zero_fee_universe_count or 0)})"
+                )
+
+            # Keep this event useful without writing it every 100ms.
+            now_log = time.time()
+            if now_log - float(getattr(self, "_last_wave_existing_log_ts", 0.0) or 0.0) >= 5.0:
+                self._last_wave_existing_log_ts = now_log
+                self._log_event(
+                    "wave_skip_existing_positions",
+                    positions=existing,
+                    scan_candidates=len(scan_rows),
+                    zero_fee_universe=int(self.stats.zero_fee_universe_count or 0),
+                    price_ready=int((self.last_wave_leader_vote_summary or self.last_wave_vote_summary or {}).get("price_ready") or 0),
+                    scan_error=scan_error,
+                )
             return
         rows = await self._refresh_market_scan(s, force=False)
         side, picks, details = self._detect_wave_signal(rows, s)

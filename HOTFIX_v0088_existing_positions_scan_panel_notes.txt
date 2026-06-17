@@ -1,0 +1,27 @@
+HOTFIX v0088 — existing positions must not freeze scan panel
+
+Problem observed in log 2026-06-17 08:01:
+- RUNNING loop heartbeat was alive.
+- last_action = wave wait: existing positions detected...
+- open positions existed: BILL_USDT, VIRTUAL_USDT.
+- last_scan_ts = 0, last_scan_rows = [], zero_fee_cache_count = 0.
+- Panel showed Universe 0/0, Ready 0, LONG/SHORT/NEUTRAL 0 forever.
+- Log also showed two start_success/run_loop_started events because runtime watchdog could call start() while user start() was still warming up.
+
+Root cause:
+_wave_loop_tick returned immediately when any existing *_USDT position was detected, before calling _refresh_market_scan(). This intentionally blocked new basket entries, but it also blocked market scan/vote diagnostics, so the Telegram live panel stayed at zeros while time kept moving.
+
+Fix:
+- Existing positions still block NEW entries.
+- Market scan now continues while existing positions are present.
+- Panel diagnostics now update: zero-fee universe, Ready/Stale, LONG/SHORT/NEUTRAL, TOP10 leader state.
+- last_action now says existing positions + scan active with candidate/universe counts.
+- wave_skip_existing_positions log is throttled to 5s instead of spamming every 100ms.
+- Added start lock: /start, inline Start and watchdog cannot create duplicate run_loop tasks during startup.
+- Added tests:
+  - tests/existing_positions_scan_panel_test.py
+  - tests/start_lock_no_double_loop_test.py
+
+Safety:
+- Does not close, modify, or open positions in the existing-position path.
+- Does not change TP/SL, leverage, margin, API keys, order sizing, or Close All logic.
